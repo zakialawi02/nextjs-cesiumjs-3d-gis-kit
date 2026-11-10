@@ -270,6 +270,10 @@ export async function injectDxfColors(dxfPath: string, geojsonPath: string): Pro
     return false;
   }
 
+  if (geodataConfig.enablePythonColorParser) {
+    // The ezdxf parser runs on the host, not in the network-less converter container.
+    logger.warning("GEODATA_ENABLE_PYTHON_COLOR_PARSER is on: parsing an uploaded DXF with ezdxf outside the converter sandbox.");
+  }
   const handleColorMap = geodataConfig.enablePythonColorParser ? await parseDxfEntityColorsWithPython(dxfPath) : {};
   const usingFallback = Object.keys(handleColorMap).length === 0;
   let layerColorMap: Record<string, LayerColor> = {};

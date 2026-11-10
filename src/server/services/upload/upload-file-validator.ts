@@ -11,7 +11,13 @@ const HEADER_BYTES = 65536;
 
 // PCRE \s without the /u flag.
 const S = "[\\t\\n\\v\\f\\r ]";
-const DXF_SECTION = new RegExp(`\\b0${S}+SECTION\\b`, "i");
+// ASCII DXF must START with a group code 0 / "SECTION" pair (optionally after a BOM, whitespace and
+// 999 comment groups). Searching anywhere in the header let other formats through as "DXF".
+// The header is decoded byte-per-char, so a UTF-8 BOM appears as "ï»¿".
+const DXF_SECTION = new RegExp(
+  `^(?:\\u00EF\\u00BB\\u00BF|\\uFEFF)?${S}*(?:999[ \\t]*\\r?\\n[^\\n]*\\n${S}*)*0[ \\t]*\\r?\\nSECTION\\b`,
+  "i",
+);
 // /^\s*\d+\s*[,\s]\s*-?[\d.]+\s*[,\s]\s*-?[\d.]+\s*[,\s]\s*-?[\d.]+/m — ^ only after "\n", as in PCRE.
 const STR_RECORD = new RegExp(
   `(?:^|(?<=\\n))${S}*\\d+${S}*[,\\t\\n\\v\\f\\r ]${S}*-?[\\d.]+${S}*[,\\t\\n\\v\\f\\r ]${S}*-?[\\d.]+${S}*[,\\t\\n\\v\\f\\r ]${S}*-?[\\d.]+`,

@@ -24,6 +24,17 @@ services:
     command: ["gdalinfo", "--version"] # Default command so 'up' doesn't fail
     restart: "no"
 
+  # GDAL for vector conversion (ogr2ogr, src/server/services/conversion/gdal-service.ts).
+  # No base volumes: each run mounts only its own input directory (read-only) and output
+  # directory, so a malicious vector file cannot reach other layers' data or the tile folders.
+  gdal-vector:
+    <<: *converter-security
+    image: ghcr.io/osgeo/gdal:ubuntu-full-latest
+    working_dir: /data
+    entrypoint: [""]
+    command: ["ogr2ogr", "--version"] # Default command so 'up' doesn't fail
+    restart: "no"
+
   # CTB — Cesium Terrain Builder (quantized-mesh)
   ctb:
     <<: *converter-security

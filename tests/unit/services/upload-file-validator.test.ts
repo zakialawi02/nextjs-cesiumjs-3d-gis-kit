@@ -16,6 +16,8 @@ describe("UploadFileValidator", () => {
     ["dwg drawing", "dwg", "AC1032rest"],
     ["ascii dxf", "dxf", "  0\nSECTION\n  2\nHEADER\n"],
     ["binary dxf", "dxf", "AutoCAD Binary DXF\r\n\x1a\x00rest"],
+    ["dxf with leading comment group", "dxf", "999\ndxfrw 0.6\n  0\r\nSECTION\r\n"],
+    ["dxf with utf-8 byte order mark", "dxf", "\xEF\xBB\xBF0\nSECTION\n"],
     ["comma delimited str", "str", "pit, 1-Jan-26,,\n1, 100.5, 200.25, 10.0\n"],
     ["whitespace delimited str", "str", "1 100.5 -200.25 10.0\n"],
     ["geojson collection", "geojson", '{"type":"FeatureCollection","features":[{"type":"Feature","geometry":null}]}'],
@@ -29,6 +31,8 @@ describe("UploadFileValidator", () => {
     ["invalid dwg version", "dwg", "AC10XXrest"],
     ["dwg signature not at start", "dwg", "xAC1032"],
     ["dxf without sections", "dxf", "999\ncomment only\n"],
+    // Other formats that only mention a DXF section somewhere (e.g. an OGR VRT) are not DXF.
+    ["dxf section not at start", "dxf", "<OGRVRTDataSource><!-- 0\nSECTION --></OGRVRTDataSource>"],
     ["binary str", "str", "1, 100.5, 200.25, 10.0\x00"],
     ["str without coordinates", "str", "pit, 1-Jan-26,,\nheader only\n"],
     ["unsupported extension", "exe", "MZ"],

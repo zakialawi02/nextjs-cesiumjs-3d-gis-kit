@@ -5,7 +5,7 @@ import { requireApiUser } from "@/server/auth";
 import { abort, handler } from "@/server/http";
 import { storage } from "@/server/storage";
 
-import { abortUnlessPublished, isMissingFileError } from "../../published-layer";
+import { abortUnlessPublished, isMissingFileError } from "@/server/geodata/published-layer";
 
 export const dynamic = "force-dynamic";
 

@@ -47,6 +47,14 @@ export async function isLayerPublished(layerId: string): Promise<boolean> {
   return lookup;
 }
 
+/**
+ * Drops the cached answer for a layer. Call it whenever a layer stops (or starts) being published —
+ * archive, restore, delete — so its tiles stop being served immediately instead of after the TTL.
+ */
+export function forgetPublishedLayer(layerId: string): void {
+  cache.delete(layerId);
+}
+
 /** 404 unless the layer exists and is published. */
 export async function abortUnlessPublished(layerId: string): Promise<void> {
   abortUnless(await isLayerPublished(layerId), 404);

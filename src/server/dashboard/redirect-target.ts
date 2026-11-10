@@ -43,5 +43,10 @@ export function internalRedirectPath(target: unknown, allowedOrigins: readonly s
     if (!allowed.includes(origin)) return null;
   }
 
-  return `${url.pathname || "/"}${url.search}${url.hash}`;
+  // URL normalisation can turn "/.//evil.example" or "/a/..//evil.example" into "//evil.example",
+  // which a browser treats as another host: re-check the normalised path.
+  const path = url.pathname || "/";
+  if (path.startsWith("//") || path.startsWith("/\\")) return null;
+
+  return `${path}${url.search}${url.hash}`;
 }

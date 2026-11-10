@@ -37,14 +37,15 @@ export async function sendPasswordResetLinkAction(formData: FormData): Promise<A
     return invalid({ email: ["Email system is unavailable. Please contact admin manually."] });
   }
 
-  let status;
   try {
     // Accounts store lower-case emails (normalised on save), so this is a case-insensitive lookup.
-    status = await sendResetLink(parsed.data.email.toLowerCase());
+    await sendResetLink(parsed.data.email.toLowerCase());
   } catch (error) {
     console.error("Password reset mail failed:", error);
     return invalid({ email: ["The password reset link could not be sent. Please try again later."] });
   }
 
-  return status === "sent" ? { ok: true, message: PASSWORD_STATUS.sent } : invalid({ email: [PASSWORD_STATUS[status]] });
+  // Unknown addresses and the resend throttle get the same answer as a sent link, so the form
+  // cannot be used to find out which email addresses have accounts.
+  return { ok: true, message: PASSWORD_STATUS.sent };
 }

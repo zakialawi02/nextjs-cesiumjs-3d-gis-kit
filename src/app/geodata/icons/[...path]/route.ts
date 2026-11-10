@@ -1,4 +1,4 @@
-import { isMissingFileError } from "@/app/geodata/terrain/published-layer";
+import { isMissingFileError } from "@/server/geodata/published-layer";
 import { ICON_PATH_PATTERN } from "@/server/geodata/presenters";
 import { requireApiUser } from "@/server/auth";
 import { abort, handler } from "@/server/http";

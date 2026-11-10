@@ -295,7 +295,7 @@ What the site config does and why it matters for this app:
 |---|---|
 | `proxy_pass http://127.0.0.1:3000` with HTTP/1.1 keep-alive | The map requests hundreds of tiles per view; `next start` runs with `--keepAliveTimeout 65000`, longer than Nginx's 60 s upstream keep-alive. |
 | `client_max_body_size 8m` | Upload chunks are 2 MB plus multipart overhead (at least 3 MB is needed); Server Actions are capped at 2 MB by `next.config.ts`. |
-| `X-Forwarded-For $remote_addr` (overwrite, not append), `X-Real-IP` | Login and password-reset rate limits use the **first** `X-Forwarded-For` hop as the client IP. Appending would let clients choose their own IP. |
+| `X-Forwarded-For $remote_addr`, `X-Real-IP` | Rate limits take the client IP `TRUSTED_PROXY_COUNT` hops from the right of `X-Forwarded-For` (default 1 = this Nginx). Set it to the number of proxies that append to the header. |
 | `Host`, `X-Forwarded-Host`, `X-Forwarded-Proto` | The same-origin (CSRF) check of the route handlers and the post-login redirect check compare the request's `Origin` with these values and `APP_URL`. |
 | `gzip_types … application/octet-stream` | Terrain tiles are sent decompressed by the route handler, and `next start` does not compress `application/octet-stream`; Nginx compresses them instead. |
 | `/cesium/` cached for 7 days | Cesium's static workers and assets; Next.js serves `public/` with `max-age=0`. |
@@ -407,7 +407,7 @@ Watch:
 - [ ] `APP_URL` and `NEXTAUTH_URL` use `https://` (secure `__Secure-` session cookie); HTTP redirects to HTTPS and HSTS is enabled. Uploads need HTTPS anyway (the browser only offers `crypto.subtle` in a secure context).
 - [ ] Seeded `admin` / `engineering` passwords changed (or the accounts deleted) after the first login.
 - [ ] `AUTH_OAUTH_ALLOW_SIGNUP=false` unless you really want anyone with an account at an enabled provider to get an `engineering` login. OAuth links to existing accounts **by email**: enable only providers you trust to verify email addresses.
-- [ ] `next start` listens on `127.0.0.1` only, and Nginx **overwrites** `X-Forwarded-For`; otherwise clients can spoof their IP and bypass the login throttle.
+- [ ] `next start` listens on `127.0.0.1` only (reachable only through Nginx), and `TRUSTED_PROXY_COUNT` matches the number of reverse proxies; otherwise per-IP throttles can be spoofed (the per-account login limit still applies).
 - [ ] Rate limits are in memory: they reset when the web process restarts and are per instance. Do not run several web instances without moving the limiter to a shared store.
 - [ ] `storage/` and `.env` are never served: Nginx proxies everything to Next.js, and nothing under `storage/` is linked into `public/`.
 - [ ] The `gis` user is the only non-admin user in the `docker` group; the server is dedicated to this app.

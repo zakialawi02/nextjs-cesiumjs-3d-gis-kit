@@ -1,4 +1,4 @@
-import { abortUnlessPublished, isMissingFileError } from "@/app/geodata/terrain/published-layer";
+import { abortUnlessPublished, isMissingFileError } from "@/server/geodata/published-layer";
 import { requireApiUser } from "@/server/auth";
 import { abort, handler } from "@/server/http";
 import { storage } from "@/server/storage";
