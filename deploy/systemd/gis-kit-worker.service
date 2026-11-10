@@ -1,0 +1,49 @@
+# Next.js CesiumJS 3D GIS Kit: queue worker (pg-boss queues upload, upload-failed, default and
+# the 30-minute geodata-cleanup-stale schedule). Starts the GDAL / CTB converter containers.
+#
+# Install:  sudo cp deploy/systemd/gis-kit-worker.service /etc/systemd/system/
+#           sudo systemctl daemon-reload && sudo systemctl enable --now gis-kit-worker
+#
+# Same code as `npm run worker` (tsx src/worker/index.ts), run as `node --import tsx` so the worker
+# itself is the main process and receives SIGTERM (tsx is a regular dependency of the app).
+# The worker loads .env from WorkingDirectory (src/server/load-env.ts);
+# Environment= lines below override values from .env.
+#
+# The user must be in the `docker` group (usermod -aG docker gis) and GEODATA_CONVERTER_USER in
+# .env must be this user's uid:gid (`id gis`).
+#
+# Shutdown: on SIGTERM the worker stops taking jobs, gives running jobs WORKER_SHUTDOWN_TIMEOUT_MS
+# to finish, then aborts them (they are retried once) and waits up to 20 s for their failure
+# handling (killing converter containers). TimeoutStopSec must be larger than
+# WORKER_SHUTDOWN_TIMEOUT_MS / 1000 + 20 s. KillMode=mixed sends SIGTERM to the worker only, so
+# the `docker compose run` children are not interrupted before the worker decides what to do.
+# To let long terrain conversions finish during restarts, raise both values (e.g. 7200000 ms and
+# TimeoutStopSec=7300).
+
+[Unit]
+Description=Next.js CesiumJS 3D GIS Kit - queue worker (pg-boss, GDAL/CTB conversions)
+After=network-online.target postgresql.service docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=gis
+Group=gis
+SupplementaryGroups=docker
+WorkingDirectory=/srv/gis-kit
+Environment=NODE_ENV=production
+Environment=WORKER_SHUTDOWN_TIMEOUT_MS=60000
+ExecStart=/usr/bin/node --import tsx src/worker/index.ts
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=120
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

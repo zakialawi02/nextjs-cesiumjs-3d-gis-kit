@@ -1,0 +1,39 @@
+# Next.js CesiumJS 3D GIS Kit: web process (next start).
+#
+# Install:  sudo cp deploy/systemd/gis-kit-web.service /etc/systemd/system/
+#           sudo systemctl daemon-reload && sudo systemctl enable --now gis-kit-web
+#
+# Adjust User/Group, WorkingDirectory and the node path (`which node`; nvm installs live under
+# the user's home) to your server. Next.js loads /srv/gis-kit/.env itself, so no EnvironmentFile
+# is needed; Environment= lines below override values from .env.
+#
+# This runs the same `next start` as `npm start`, but calls Next's CLI directly so SIGTERM reaches
+# the Node.js process, and binds to 127.0.0.1 so the app is only reachable through Nginx (the app
+# trusts X-Forwarded-For for rate limits). `next start` reads the port from --port or PORT; the
+# bind address only from --hostname. --keepAliveTimeout keeps idle upstream connections open
+# longer than Nginx's upstream keepalive_timeout (60 s).
+
+[Unit]
+Description=Next.js CesiumJS 3D GIS Kit - web (next start)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gis
+Group=gis
+WorkingDirectory=/srv/gis-kit
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 3000 --keepAliveTimeout 65000
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Light hardening. The app writes to storage/ and .next/cache inside WorkingDirectory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

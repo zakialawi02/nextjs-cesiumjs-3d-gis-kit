@@ -1,0 +1,94 @@
+/*
+ * Swagger UI keeps its own light theme, also when the app is in dark mode (html.dark). Tailwind's
+ * preflight removes browser defaults (list bullets, heading sizes, link colours) that Swagger UI's
+ * stylesheet relies on inside rendered Markdown, so they are restored here.
+ */
+.api-docs-swagger {
+  color-scheme: light;
+  background: #ffffff;
+  color: #3b4151;
+  min-height: 100%;
+}
+
+.api-docs-swagger .swagger-ui .wrapper {
+  max-width: 1280px;
+}
+
+.api-docs-swagger .swagger-ui .info {
+  margin: 32px 0 24px;
+}
+
+.api-docs-swagger .swagger-ui :is(.markdown, .renderedMarkdown) :is(h1, h2, h3, h4) {
+  color: #3b4151;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.api-docs-swagger .swagger-ui :is(.markdown, .renderedMarkdown) h1 {
+  font-size: 1.6em;
+  margin: 1.4em 0 0.5em;
+}
+
+.api-docs-swagger .swagger-ui :is(.markdown, .renderedMarkdown) h2 {
+  font-size: 1.35em;
+  margin: 1.4em 0 0.5em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.api-docs-swagger .swagger-ui :is(.markdown, .renderedMarkdown) :is(h3, h4) {
+  font-size: 1.1em;
+  margin: 1.2em 0 0.4em;
+}
+
+.api-docs-swagger .swagger-ui :is(.markdown, .renderedMarkdown) ul {
+  list-style: disc;
+  margin: 0.5em 0;
+  padding-left: 1.5em;
+}
+
+.api-docs-swagger .swagger-ui :is(.markdown, .renderedMarkdown) ol {
+  list-style: decimal;
+  margin: 0.5em 0;
+  padding-left: 1.5em;
+}
+
+.api-docs-swagger .swagger-ui :is(.markdown, .renderedMarkdown) li {
+  margin: 0.3em 0;
+}
+
+.api-docs-swagger .swagger-ui :is(.markdown, .renderedMarkdown) a {
+  color: #047857;
+  text-decoration: underline;
+}
+
+.api-docs-swagger .swagger-ui :is(.markdown, .renderedMarkdown) table {
+  border-collapse: collapse;
+  margin: 0.75em 0;
+}
+
+.api-docs-swagger .swagger-ui :is(.markdown, .renderedMarkdown) :is(th, td) {
+  border: 1px solid #d9dde3;
+  padding: 4px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.api-docs-swagger .swagger-ui :is(.markdown, .renderedMarkdown) th {
+  background: #f4f6f8;
+}
+
+.api-docs-swagger .swagger-ui :is(.markdown, .renderedMarkdown) pre {
+  background: #f4f6f8;
+  border-radius: 6px;
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+
+.api-docs-swagger .swagger-ui :is(.markdown, .renderedMarkdown) pre > code {
+  background: none;
+  color: #1f2937;
+  font-weight: 400;
+  padding: 0;
+  white-space: pre;
+}

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none">
+    <g transform="translate(4 2)">
+        <path d="m20 1 18 10.5v21L20 43 2 32.5v-21L20 1Z" fill="#0d9fa5" />
+        <path d="M20 1v21L2 11.5 20 1Z" fill="#42ded5" />
+        <path d="m20 1 18 10.5L20 22V1Z" fill="#ffe5a0" />
+        <path d="m2 11.5 18 10.5L2 32.5v-21Z" fill="#10b9be" />
+        <path d="m38 11.5-18 10.5 18 10.5v-21Z" fill="#079197" />
+        <path d="M20 22v21L2 32.5 20 22Z" fill="#087e87" />
+        <path d="m20 22 18 10.5L20 43V22Z" fill="#0aaab0" />
+    </g>
+</svg>

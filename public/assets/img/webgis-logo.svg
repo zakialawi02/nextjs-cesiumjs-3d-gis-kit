@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none">
+  <title>3D WebGIS</title>
+  <path d="M7 43 32 57 57 43" stroke="#3B82F6" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M7 33 32 47 57 33" stroke="#38BDF8" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m32 7 25 15-25 15L7 22 32 7Z" fill="#0D9488" stroke="#0D9488" stroke-width="5" stroke-linejoin="round"/>
+  <path d="m19 22 13-7 13 7-13 8-13-8Z" stroke="white" stroke-width="2.5" stroke-linejoin="round"/>
+  <circle cx="32" cy="22" r="3" fill="white"/>
+</svg>

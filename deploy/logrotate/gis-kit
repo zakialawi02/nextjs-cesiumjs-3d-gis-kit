@@ -1,0 +1,17 @@
+# Next.js CesiumJS 3D GIS Kit: rotation for storage/logs/*.log (app, terrain_conversion,
+# vector_conversion). The logger opens the file for every line it appends, so a moved file is
+# simply recreated; no copytruncate or service reload is needed.
+#
+# Install:  sudo cp deploy/logrotate/gis-kit /etc/logrotate.d/gis-kit
+#           sudo logrotate --debug /etc/logrotate.d/gis-kit
+
+/srv/gis-kit/storage/logs/*.log {
+    su gis gis
+    weekly
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 gis gis
+}

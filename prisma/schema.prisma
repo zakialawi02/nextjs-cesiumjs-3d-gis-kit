@@ -1,0 +1,262 @@
+// Prisma schema for the CesiumJS 3D GIS Kit (PostgreSQL + PostGIS).
+//
+// Column names stay snake_case so raw SQL, API payloads and the ported frontend share one vocabulary.
+// Vector layers are NOT modelled here: each one is a dynamic PostGIS table `vector_<layer id>`
+// created at runtime in the separate `geodata_vectors` schema (see src/server/services/database),
+// so Prisma never sees them and `prisma migrate dev` reports no drift.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Accounts. Sign in with username/email + password (credentials) or a linked OAuth account.
+model User {
+  id                 String    @id @default(uuid()) @db.Uuid
+  name               String
+  username           String    @unique
+  email              String    @unique
+  email_verified_at  DateTime?
+  /// bcrypt hash; null for accounts that only sign in through OAuth.
+  password           String?
+  profile_photo_path String    @default("/assets/img/profile/user.png") @db.VarChar(2048)
+  /// admin | engineering
+  role               String    @default("engineering") @db.VarChar(20)
+  created_at         DateTime  @default(now())
+  updated_at         DateTime  @updatedAt
+  deleted_at         DateTime?
+
+  accounts        Account[]
+  layers          Layer[]
+  upload_sessions UploadSession[]
+
+  @@index([role])
+  @@map("users")
+}
+
+/// OAuth identities (Discord, GitHub, Google) linked to a user.
+model Account {
+  id                  String   @id @default(ulid())
+  user_id             String   @db.Uuid
+  type                String   @db.VarChar(30)
+  provider            String   @db.VarChar(50)
+  provider_account_id String
+  created_at          DateTime @default(now())
+  updated_at          DateTime @updatedAt
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([provider, provider_account_id])
+  @@index([user_id])
+  @@map("accounts")
+}
+
+model PasswordResetToken {
+  email      String    @id
+  /// sha256 of the token mailed to the user
+  token      String
+  created_at DateTime?
+
+  @@map("password_reset_tokens")
+}
+
+model SourceFile {
+  id              String   @id @default(ulid())
+  /// Original filename at upload time
+  original_name   String
+  /// Randomized filename used in storage
+  stored_name     String
+  /// tif | tiff | geotiff | shapefile | geojson | dxf | dwg | str
+  file_type       String   @db.VarChar(20)
+  mime_type       String   @db.VarChar(100)
+  file_size       BigInt
+  /// Path relative to the geodata disk (storage/app/geodata)
+  storage_path    String
+  checksum_sha256 String   @db.VarChar(64)
+  metadata        Json?
+  /// uploading | uploaded | validating | ready | invalid
+  status          String   @default("uploading") @db.VarChar(20)
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+
+  conversion_jobs       ConversionJob[]  @relation("ConversionJobSource")
+  ortho_conversion_jobs ConversionJob[]  @relation("ConversionJobOrtho")
+  terrain_details       TerrainDetail[]  @relation("TerrainDetailSource")
+  ortho_terrain_details TerrainDetail[]  @relation("TerrainDetailOrtho")
+  vector_details        VectorDetail[]
+  upload_sessions       UploadSession[]
+
+  @@map("source_files")
+}
+
+model ConversionJob {
+  id              String    @id @default(ulid())
+  /// terrain | vector | imagery
+  layer_type      String    @db.VarChar(20)
+  source_file_id  String
+  ortho_file_id   String?
+  /// queued | processing | done | failed
+  status          String    @default("queued") @db.VarChar(20)
+  conversion_tool String?   @db.VarChar(50)
+  attempts        Int       @default(0) @db.SmallInt
+  error_message   String?
+  started_at      DateTime?
+  finished_at     DateTime?
+  created_at      DateTime  @default(now())
+  updated_at      DateTime  @updatedAt
+
+  source_file     SourceFile      @relation("ConversionJobSource", fields: [source_file_id], references: [id], onDelete: Restrict)
+  ortho_file      SourceFile?     @relation("ConversionJobOrtho", fields: [ortho_file_id], references: [id], onDelete: SetNull)
+  logs            ConversionLog[]
+  layer           Layer?
+  upload_sessions UploadSession[]
+
+  @@index([status])
+  @@map("conversion_jobs")
+}
+
+model ConversionLog {
+  id          String    @id @default(ulid())
+  job_id      String
+  attempt     Int       @db.SmallInt
+  started_at  DateTime
+  finished_at DateTime?
+  exit_code   Int?
+  stdout_log  String?
+  stderr_log  String?
+  output_size BigInt?
+  created_at  DateTime  @default(now())
+  updated_at  DateTime  @updatedAt
+
+  job ConversionJob @relation(fields: [job_id], references: [id], onDelete: Cascade)
+
+  @@index([job_id, attempt])
+  @@map("conversion_logs")
+}
+
+model LayerCategory {
+  id          String   @id @default(ulid())
+  name        String   @db.VarChar(100)
+  /// "other" is the protected fallback category
+  slug        String   @unique @db.VarChar(150)
+  color       String   @default("#888888") @db.VarChar(9)
+  /// e.g. icons/layer-categories/<random>.png on the public disk
+  icon_path   String?
+  description String?
+  sort_order  Int      @default(0)
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+
+  layers Layer[]
+
+  @@map("layer_categories")
+}
+
+model Layer {
+  id                String    @id @default(ulid())
+  user_id           String?   @db.Uuid
+  job_id            String    @unique
+  name              String
+  slug              String    @unique
+  /// terrain | vector | imagery
+  layer_type        String    @db.VarChar(20)
+  /// pending | queued | processing | published | process_failed | archived
+  status            String    @default("pending") @db.VarChar(20)
+  layer_category_id String?
+  published_at      DateTime?
+  created_at        DateTime  @default(now())
+  updated_at        DateTime  @updatedAt
+
+  user           User?          @relation(fields: [user_id], references: [id], onDelete: SetNull)
+  job            ConversionJob  @relation(fields: [job_id], references: [id], onDelete: Restrict)
+  category       LayerCategory? @relation(fields: [layer_category_id], references: [id], onDelete: SetNull)
+  terrain_detail TerrainDetail?
+  vector_detail  VectorDetail?
+
+  @@index([user_id])
+  @@index([status])
+  @@map("layers")
+}
+
+model TerrainDetail {
+  id                  String    @id @default(ulid())
+  layer_id            String    @unique
+  source_file_id      String
+  ortho_file_id       String?
+  has_ortho           Boolean   @default(false)
+  /// e.g. xyz-tiles/<layer id>_ortho on the public disk
+  ortho_tiles_path    String?
+  ortho_min_zoom      Int?
+  ortho_max_zoom      Int?
+  native_bounding_box Json?
+  srs                 String?   @db.VarChar(50)
+  /// pnts | b3dm | terrain
+  output_type         String    @default("terrain") @db.VarChar(20)
+  /// e.g. terrain-tiles/<layer id> on the public disk
+  tileset_path        String?
+  /// e.g. /geodata/terrain/<layer id>
+  tileset_url         String?
+  acquisition_date    DateTime? @db.Date
+
+  layer       Layer       @relation(fields: [layer_id], references: [id], onDelete: Cascade)
+  source_file SourceFile  @relation("TerrainDetailSource", fields: [source_file_id], references: [id], onDelete: Restrict)
+  ortho_file  SourceFile? @relation("TerrainDetailOrtho", fields: [ortho_file_id], references: [id], onDelete: SetNull)
+
+  @@map("terrain_details")
+}
+
+model VectorDetail {
+  id                  String    @id @default(ulid())
+  layer_id            String    @unique
+  source_file_id      String
+  native_bounding_box Json?
+  srs                 String?   @db.VarChar(50)
+  source_format       String?   @db.VarChar(20)
+  source_epsg         String?   @db.VarChar(50)
+  geometry_type       String?   @db.VarChar(30)
+  feature_count       Int       @default(0)
+  acquisition_date    DateTime? @db.Date
+  /// vector_<layer id>, a table in the geodata_vectors schema
+  physical_table_name String?
+  /// mvt | geojson | flatgeobuf
+  output_type         String    @default("geojson") @db.VarChar(20)
+  output_path         String?
+
+  layer       Layer      @relation(fields: [layer_id], references: [id], onDelete: Cascade)
+  source_file SourceFile @relation(fields: [source_file_id], references: [id], onDelete: Restrict)
+
+  @@map("vector_details")
+}
+
+model UploadSession {
+  id                String    @id @default(uuid()) @db.Uuid
+  user_id           String    @db.Uuid
+  request_id        String    @db.Uuid
+  file_name         String
+  file_size         BigInt
+  chunk_size        Int
+  total_chunks      Int
+  /// { "<chunk index>": "<sha256>" } of the chunks received so far
+  chunks            Json
+  /// uploading | queued | assembled | failed | cancelled
+  status            String    @default("uploading") @db.VarChar(20)
+  source_file_id    String?
+  conversion_job_id String?
+  completion_hash   String?   @db.VarChar(64)
+  expires_at        DateTime
+  created_at        DateTime  @default(now())
+  updated_at        DateTime  @updatedAt
+
+  user           User           @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  source_file    SourceFile?    @relation(fields: [source_file_id], references: [id], onDelete: SetNull)
+  conversion_job ConversionJob? @relation(fields: [conversion_job_id], references: [id], onDelete: SetNull)
+
+  @@unique([user_id, request_id])
+  @@index([user_id, status])
+  @@index([expires_at])
+  @@map("upload_sessions")
+}

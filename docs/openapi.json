@@ -1,0 +1,4235 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "3D WebGIS Core API",
+    "version": "1.0.0",
+    "description": "HTTP API of **3D WebGIS Core**: published layer lists, terrain / orthophoto tiles, vector GeoJSON and the chunked geodata upload used by the 3D map. Request and response bodies are JSON unless an operation says otherwise.\n\nThe dashboard's management actions (layer renaming / archiving, layer categories, users, profile) are Next.js Server Actions, not REST endpoints, and are not part of this document.\n\n## Authentication\n\nEvery `/geodata/*` endpoint needs a signed-in user. Sessions are NextAuth v4 JWTs kept in an HTTP-only cookie: `next-auth.session-token` (`__Secure-next-auth.session-token` over HTTPS). On this page your browser sends that cookie by itself, so **Try it out** runs as you.\n\nAPI clients sign in with the credentials flow and keep a cookie jar:\n\n1. `GET /api/auth/csrf` → `{ \"csrfToken\": \"...\" }` plus a `next-auth.csrf-token` cookie.\n2. `POST /api/auth/callback/credentials` as `application/x-www-form-urlencoded` with `csrfToken`, `id_user` (username or email), `password`, `remember=true|false` and `json=true`. Success is `200 { \"url\": ... }` with the session cookie; wrong credentials are `401`.\n3. Send the cookie with every request. `GET /api/auth/session` shows the signed-in user; `POST /api/auth/signout` (with a fresh `csrfToken`) clears the cookie.\n\n```bash\ncurl -c jar -b jar http://localhost:3000/api/auth/csrf\ncurl -c jar -b jar http://localhost:3000/api/auth/callback/credentials \\\n  --data-urlencode csrfToken=<token> --data-urlencode id_user=<username> \\\n  --data-urlencode password=<password> -d remember=false -d json=true\ncurl -b jar http://localhost:3000/geodata/layers/all\n```\n\nWithout \"Remember me\" a session ends after 120 idle minutes; with it, after 30 days. Deleting a user or changing their password revokes their sessions. Sign-in is throttled (20 attempts per minute per IP, 5 failed attempts per identifier and IP). OAuth sign-in (Discord, GitHub, Google, when configured) is a browser redirect flow and cannot be used by API clients.\n\n## Roles\n\n| Role | Access |\n| --- | --- |\n| `admin` | Everything: layer lists, tiles, vector data, uploads, recent uploads, layer deletion. |\n| `engineering` | Read-only: layer lists, categories, icons, tiles and vector data. |\n\nA request without a valid session gets `401 {\"message\":\"Unauthenticated.\"}`; a role without access gets `403 {\"message\":\"This action is unauthorized.\"}`.\n\n## CSRF protection\n\n`POST` and `DELETE` requests to `/geodata/*` must come from the app's own origin: when the request has an `Origin` header it must equal the app origin (or `APP_URL`), otherwise `Sec-Fetch-Site` must be `same-origin` or `none`. Anything else gets `419 {\"message\":\"CSRF token mismatch.\"}`. Non-browser clients that send neither header pass. The NextAuth endpoints use their own `csrfToken` instead (see Authentication).\n\n## Errors\n\nErrors of `/geodata/*` are JSON: `{ \"message\": \"...\" }`, and for validation failures (422) `{ \"message\": \"<first error>\", \"errors\": { \"<field>\": [\"...\"] } }`.\n\n| Status | Meaning |\n| --- | --- |\n| 400 | Malformed JSON body |\n| 401 / 403 | Not signed in / role not allowed |\n| 404 | Not found, not published, or not yours (upload sessions and jobs) |\n| 409 | Conflicting state (upload incomplete or already submitted, layer still processing) |\n| 410 | Upload session expired |\n| 413 | Upload quota exceeded (2000 MB in flight per user) |\n| 419 | CSRF check failed |\n| 422 | Validation failed |\n| 429 | Rate limit (`Retry-After` header) or too many active uploads |\n| 500 | Unexpected error (the message is generic in production) |\n| 503 | Upload could not be queued |\n| 507 | Not enough free disk space |\n\nTile endpoints answer a missing tile with a plain-text (or empty) 404 instead of JSON.\n\n## Upload flow\n\nUploads are admin-only and limited per user per minute: `upload-start` 20 (start, cancel, assemble), `upload-chunks` 240, `upload-status` 120 (session and job status).\n\n1. **Start a session**: `POST /geodata/upload/sessions` with `{ fileName, fileSize, requestId }` → `201 { session }`. Use one random UUID `requestId` per file and reuse it on retries. Allowed extensions: `.tif`, `.tiff`, `.geotiff`, `.geojson`, `.dxf`, `.dwg`, `.str`, `.zip`; at most 1000 MB per file, 4 active sessions and 2000 MB in flight per user. Unfinished sessions expire 24 hours after the last stored chunk.\n2. **Send the chunks**: split the file into `session.chunkSize` (2 MB) pieces and `POST /geodata/upload/chunk` each one as `multipart/form-data` with `file`, `identifier`, `chunkIndex` and `checksum` (lowercase hex SHA-256 of the chunk). Order does not matter and retries are safe. To resume, `GET /geodata/upload/sessions/{identifier}` and send the indexes missing from `chunks`.\n3. **Assemble**: `POST /geodata/upload/assemble-raster` (DEM GeoTIFF plus an optional orthophoto session) or `POST /geodata/upload/assemble-vector` (GeoJSON, zipped Shapefile, DXF, DWG, Surpac STR) → `202 { job_id }`. The layer is created with status `processing`.\n4. **Poll**: `GET /geodata/upload/status/{job_id}` until `status` is `done` (the response then contains the layer) or `failed`.\n\n`DELETE /geodata/upload/sessions/{identifier}` cancels an upload that has not been assembled yet. Files are verified by the background worker (format signature, Shapefile archive limits), so a bad file shows up as a `failed` job rather than an HTTP error.",
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "This application"
+    }
+  ],
+  "security": [
+    {
+      "sessionCookie": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "Auth",
+      "description": "NextAuth endpoints for signing in API clients with username / email and password."
+    },
+    {
+      "name": "Layers",
+      "description": "Published layer lists, layer categories and their icons, layer deletion."
+    },
+    {
+      "name": "Tiles",
+      "description": "Terrain (quantized-mesh) and orthophoto (XYZ PNG) tiles of published layers, as loaded by CesiumJS."
+    },
+    {
+      "name": "Vector",
+      "description": "Vector layers as GeoJSON."
+    },
+    {
+      "name": "Upload",
+      "description": "Chunked, resumable geodata upload and conversion status (admin only)."
+    },
+    {
+      "name": "Health",
+      "description": "Liveness and database check."
+    },
+    {
+      "name": "Docs",
+      "description": "This OpenAPI document."
+    }
+  ],
+  "paths": {
+    "/api/auth/csrf": {
+      "get": {
+        "tags": [
+          "Auth"
+        ],
+        "operationId": "getCsrfToken",
+        "summary": "Get a CSRF token for sign-in / sign-out",
+        "description": "Step 1 of the credentials sign-in. Returns the token and sets the `next-auth.csrf-token` cookie; send both (token in the form body, cookie in `Cookie`) to `POST /api/auth/callback/credentials` or `POST /api/auth/signout`.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "CSRF token.",
+            "headers": {
+              "Set-Cookie": {
+                "$ref": "#/components/headers/CsrfCookie"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CsrfTokenResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/callback/credentials": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "operationId": "signInWithCredentials",
+        "summary": "Sign in with username / email and password",
+        "description": "Step 2 of the credentials sign-in (NextAuth credentials provider). Send the form with the cookies from `GET /api/auth/csrf`; on success the response sets the JWT session cookie (`next-auth.session-token`, `__Secure-next-auth.session-token` over HTTPS) that authenticates every other request.\n\nThrottled: 20 attempts per minute per IP and 5 failed attempts per identifier + IP; a throttled attempt answers 401 like wrong credentials, with the wait time in the message.\n\nNote NextAuth's quirk: a missing or mismatched `csrfToken` answers **200** with `url` ending in `/api/auth/signin?csrf=true` and no session cookie, so check for the cookie (or call `GET /api/auth/session`).",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/CredentialsSignInRequest"
+              },
+              "examples": {
+                "admin": {
+                  "summary": "Sign in by username",
+                  "value": {
+                    "csrfToken": "<token from /api/auth/csrf>",
+                    "id_user": "admin",
+                    "password": "<password>",
+                    "remember": "false",
+                    "json": "true"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Signed in (session cookie set), or CSRF check failed (no cookie, `url` ends in `?csrf=true`).",
+            "headers": {
+              "Set-Cookie": {
+                "$ref": "#/components/headers/SessionCookie"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthUrlResponse"
+                },
+                "examples": {
+                  "signedIn": {
+                    "summary": "Signed in",
+                    "value": {
+                      "url": "http://localhost:3000"
+                    }
+                  },
+                  "csrfMismatch": {
+                    "summary": "Missing / wrong csrfToken",
+                    "value": {
+                      "url": "http://localhost:3000/api/auth/signin?csrf=true"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "302": {
+            "description": "Without `json=true`: browser-style redirect (to `callbackUrl` on success, else to the login page).",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Wrong credentials or too many attempts; the message is in the `error` query parameter of `url`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthUrlResponse"
+                },
+                "examples": {
+                  "failed": {
+                    "summary": "These credentials do not match our records.",
+                    "value": {
+                      "url": "http://localhost:3000/api/auth/error?error=These%20credentials%20do%20not%20match%20our%20records."
+                    }
+                  },
+                  "throttled": {
+                    "summary": "Too many login attempts. Please try again in 42 seconds.",
+                    "value": {
+                      "url": "http://localhost:3000/api/auth/error?error=Too%20many%20login%20attempts.%20Please%20try%20again%20in%2042%20seconds."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/session": {
+      "get": {
+        "tags": [
+          "Auth"
+        ],
+        "operationId": "getSession",
+        "summary": "Current session",
+        "description": "The signed-in user, `{}` without a session, or `{ expires, invalid: true }` when the token belongs to a deleted user or predates a password change. Calling it also extends a session without \"Remember me\".",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Session (or an empty object).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Session"
+                    },
+                    {
+                      "$ref": "#/components/schemas/InvalidSession"
+                    },
+                    {
+                      "type": "object",
+                      "maxProperties": 0
+                    }
+                  ]
+                },
+                "examples": {
+                  "signedIn": {
+                    "summary": "Signed in",
+                    "value": {
+                      "user": {
+                        "id": "d5e79ebd-e3cb-41aa-9ba3-e0f3bc3bd88d",
+                        "name": "Admin User",
+                        "email": "admin@mail.com",
+                        "image": "/assets/img/profile/admin.png",
+                        "username": "admin",
+                        "role": "admin"
+                      },
+                      "expires": "2026-12-09T17:01:21.802Z"
+                    }
+                  },
+                  "signedOut": {
+                    "summary": "No session",
+                    "value": {}
+                  },
+                  "invalid": {
+                    "summary": "Revoked session",
+                    "value": {
+                      "expires": "2026-12-09T17:01:21.802Z",
+                      "invalid": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/providers": {
+      "get": {
+        "tags": [
+          "Auth"
+        ],
+        "operationId": "getAuthProviders",
+        "summary": "Enabled sign-in providers",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Providers keyed by id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthProviders"
+                },
+                "examples": {
+                  "credentialsOnly": {
+                    "summary": "No OAuth provider configured",
+                    "value": {
+                      "credentials": {
+                        "id": "credentials",
+                        "name": "Username",
+                        "type": "credentials",
+                        "signinUrl": "http://localhost:3000/api/auth/signin/credentials",
+                        "callbackUrl": "http://localhost:3000/api/auth/callback/credentials"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/signout": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "operationId": "signOut",
+        "summary": "Sign out",
+        "description": "Clears the session cookie (`Max-Age=0`). Sessions are stateless JWTs, so a copied token stays valid until it expires unless the password is changed. A missing or wrong `csrfToken` signs nothing out and points `url` to `/api/auth/signout?csrf=true` (302 without `json=true`).",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/SignOutRequest"
+              },
+              "example": {
+                "csrfToken": "<token from /api/auth/csrf>",
+                "json": "true"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Signed out.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthUrlResponse"
+                },
+                "examples": {
+                  "signedOut": {
+                    "summary": "Signed out",
+                    "value": {
+                      "url": "http://localhost:3000"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "302": {
+            "description": "Without `json=true`: redirect.",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/geodata/layers/all": {
+      "get": {
+        "tags": [
+          "Layers"
+        ],
+        "operationId": "listLayers",
+        "summary": "Published layers grouped by category",
+        "description": "Published terrain and vector layers for the map's layer panel, grouped by layer category (category sort order, newest layer first). Layers without a category are listed under the `other` category; categories without a matching layer are left out.\n\n**Role:** any signed-in user (`admin`, `engineering`).",
+        "parameters": [
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Case-insensitive substring of the layer name (trimmed; empty = no filter).",
+            "schema": {
+              "type": "string"
+            },
+            "example": "dem"
+          },
+          {
+            "name": "month_year",
+            "in": "query",
+            "description": "Only layers uploaded in this month (UTC), as `YYYY-MM`. Other formats are ignored; an impossible month such as `2026-13` matches nothing.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}$"
+            },
+            "example": "2026-11"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Layers by category.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LayerListResponse"
+                },
+                "examples": {
+                  "layers": {
+                    "summary": "One terrain and one vector layer",
+                    "value": {
+                      "success": true,
+                      "categories": [
+                        {
+                          "id": "01JH8Y2B4D6F8H0K2M4P6R8T0V",
+                          "name": "Terrain & Orthophoto",
+                          "slug": "terrain-orthophoto",
+                          "color": "#0ea5e9",
+                          "icon_url": null,
+                          "layers": [
+                            {
+                              "id": "01JH8Z9X2Q4K7M3N5P6R8S9T0V",
+                              "name": "DEM 12-07-2022",
+                              "layer_type": "terrain",
+                              "created_at": "09 Nov 2026",
+                              "terrain_detail": {
+                                "tileset_url": "/geodata/terrain/01JH8Z9X2Q4K7M3N5P6R8S9T0V",
+                                "has_ortho": true,
+                                "native_bounding_box": {
+                                  "east": 117.2635039,
+                                  "west": 117.2551064,
+                                  "north": -0.659641,
+                                  "south": -0.6645944
+                                },
+                                "acquisition_date": "12 Jul 2022",
+                                "has_ortho_tiles": true,
+                                "ortho_tiles_url": "/geodata/ortho/01JH8Z9X2Q4K7M3N5P6R8S9T0V_ortho/{z}/{x}/{y}.png",
+                                "ortho_min_zoom": 10,
+                                "ortho_max_zoom": 20
+                              }
+                            }
+                          ]
+                        },
+                        {
+                          "id": "01JH8Y2B4D6F8H0K2M4P6R8T0W",
+                          "name": "Design",
+                          "slug": "design",
+                          "color": "#f59e0b",
+                          "icon_url": "/geodata/icons/layer-categories/q8ZtR2mXk4Wv.webp",
+                          "layers": [
+                            {
+                              "id": "01JH8ZC4W6Y8A0B2D4F6H8K0M2",
+                              "name": "Pit_design A",
+                              "layer_type": "vector",
+                              "created_at": "09 Nov 2026",
+                              "vector_detail": {
+                                "geometry_type": "Point",
+                                "feature_count": 34717,
+                                "native_bounding_box": {
+                                  "east": 111.28018581,
+                                  "west": 111.25785334,
+                                  "north": -0.62101633,
+                                  "south": -0.65046553
+                                },
+                                "acquisition_date": "N/A"
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "empty": {
+                    "summary": "Nothing matches",
+                    "value": {
+                      "success": true,
+                      "categories": []
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/geodata/layers/terrain": {
+      "get": {
+        "tags": [
+          "Layers"
+        ],
+        "operationId": "listTerrainLayers",
+        "summary": "Published terrain layers",
+        "description": "Newest published terrain layers, for the comparison-terrain pickers of the Cut & Fill and Profile tools.\n\n**Role:** any signed-in user (`admin`, `engineering`).",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of layers. Clamped to 1–100; a non-numeric value counts as 1.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 30
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Terrain layers.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TerrainLayerListResponse"
+                },
+                "examples": {
+                  "layers": {
+                    "summary": "One terrain layer",
+                    "value": {
+                      "success": true,
+                      "layers": [
+                        {
+                          "id": "01JH8Z9X2Q4K7M3N5P6R8S9T0V",
+                          "name": "DEM 12-07-2022",
+                          "terrain_detail": {
+                            "tileset_url": "/geodata/terrain/01JH8Z9X2Q4K7M3N5P6R8S9T0V",
+                            "acquisition_date": "12 Jul 2022"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/geodata/layers/recent-uploads": {
+      "get": {
+        "tags": [
+          "Layers"
+        ],
+        "operationId": "listRecentUploads",
+        "summary": "Latest conversion jobs",
+        "description": "The 10 newest conversion jobs (any uploader), for the Data panel.\n\n**Role:** `admin`.",
+        "responses": {
+          "200": {
+            "description": "Recent jobs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecentUploadsResponse"
+                },
+                "examples": {
+                  "jobs": {
+                    "summary": "A running and a finished job",
+                    "value": {
+                      "success": true,
+                      "jobs": [
+                        {
+                          "id": "01JH8ZC4W5R7T9V1X3Z5A7B9C1",
+                          "status": "processing",
+                          "status_label": "Processing",
+                          "layer_type": "vector",
+                          "layer_name": "Pit_design A",
+                          "time_diff": "5 seconds ago",
+                          "is_done": false,
+                          "is_failed": false
+                        },
+                        {
+                          "id": "01JH8Z9X2P1E3G5J7K9M1N3P5Q",
+                          "status": "done",
+                          "status_label": "Done",
+                          "layer_type": "terrain",
+                          "layer_name": "DEM 12-07-2022",
+                          "time_diff": "7 minutes ago",
+                          "is_done": true,
+                          "is_failed": false
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/geodata/layers/{layer}": {
+      "delete": {
+        "tags": [
+          "Layers"
+        ],
+        "operationId": "deleteLayer",
+        "summary": "Delete a layer",
+        "description": "Deletes the layer with its conversion job, logs, upload sessions and source files, then queues the removal of its tiles, files and PostGIS table. Refused (409) while the conversion is queued or processing, unless the job has been idle for more than 3 hours. Cannot be undone.\n\n**Role:** `admin`.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/LayerUlid"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LayerDeletedResponse"
+                },
+                "examples": {
+                  "deleted": {
+                    "summary": "Layer deleted.",
+                    "value": {
+                      "success": true,
+                      "message": "Layer deleted."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "The layer's conversion is still running.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LayerBusyResponse"
+                },
+                "examples": {
+                  "busy": {
+                    "summary": "Still processing",
+                    "value": {
+                      "success": false,
+                      "message": "This layer is still being processed. Wait until its conversion finishes or fails before deleting it."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "419": {
+            "$ref": "#/components/responses/CsrfMismatch"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/geodata/layer-categories": {
+      "get": {
+        "tags": [
+          "Layers"
+        ],
+        "operationId": "listLayerCategories",
+        "summary": "Layer categories",
+        "description": "All layer categories in sort order (for the upload form's category picker).\n\n**Role:** any signed-in user (`admin`, `engineering`).",
+        "responses": {
+          "200": {
+            "description": "Categories.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CategoryListResponse"
+                },
+                "examples": {
+                  "categories": {
+                    "summary": "Default categories",
+                    "value": {
+                      "success": true,
+                      "categories": [
+                        {
+                          "id": "01JH8Y2B4D6F8H0K2M4P6R8T0V",
+                          "name": "Terrain & Orthophoto",
+                          "slug": "terrain-orthophoto",
+                          "color": "#0ea5e9",
+                          "icon_url": null
+                        },
+                        {
+                          "id": "01JH8Y2B4D6F8H0K2M4P6R8T0W",
+                          "name": "Design",
+                          "slug": "design",
+                          "color": "#f59e0b",
+                          "icon_url": "/geodata/icons/layer-categories/q8ZtR2mXk4Wv.webp"
+                        },
+                        {
+                          "id": "01JH8Y2B4D6F8H0K2M4P6R8T0X",
+                          "name": "Boundary",
+                          "slug": "boundary",
+                          "color": "#10b981",
+                          "icon_url": null
+                        },
+                        {
+                          "id": "01JH8Y2B4D6F8H0K2M4P6R8T0Y",
+                          "name": "Other",
+                          "slug": "other",
+                          "color": "#6b7280",
+                          "icon_url": null
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/geodata/icons/layer-categories/{icon}": {
+      "get": {
+        "tags": [
+          "Layers"
+        ],
+        "operationId": "getCategoryIcon",
+        "summary": "Layer category icon",
+        "description": "Uploaded category icon referenced by `icon_url`. Only `layer-categories/<name>.png|webp` files are served.\n\n**Role:** any signed-in user (`admin`, `engineering`).",
+        "parameters": [
+          {
+            "name": "icon",
+            "in": "path",
+            "required": true,
+            "description": "Icon file name.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9]{1,64}\\.(png|webp)$"
+            },
+            "example": "q8ZtR2mXk4Wv.webp"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The icon.",
+            "headers": {
+              "Cache-Control": {
+                "description": "`private, max-age=86400`.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            },
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/webp": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/geodata/terrain/{layerId}/layer.json": {
+      "get": {
+        "tags": [
+          "Tiles"
+        ],
+        "operationId": "getTerrainLayerJson",
+        "summary": "Terrain tileset metadata (layer.json)",
+        "description": "Quantized-mesh `layer.json` of a published terrain layer: the entry point of `CesiumTerrainProvider.fromUrl(tileset_url)`. Tile URL templates get a `terrain_revision` parameter appended to bust stale browser caches.\n\n**Role:** any signed-in user (`admin`, `engineering`).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TerrainLayerId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tileset metadata.",
+            "headers": {
+              "Cache-Control": {
+                "description": "`no-cache`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TerrainLayerJson"
+                },
+                "examples": {
+                  "layerJson": {
+                    "summary": "Cesium Terrain Builder output",
+                    "value": {
+                      "tilejson": "2.1.0",
+                      "name": "01JH8Z9X2R3S4T5V6W7X8Y9Z0A.tif_wgs84",
+                      "description": "",
+                      "version": "1.1.0",
+                      "format": "quantized-mesh-1.0",
+                      "attribution": "",
+                      "schema": "tms",
+                      "extensions": [
+                        "octvertexnormals"
+                      ],
+                      "tiles": [
+                        "{z}/{x}/{y}.terrain?v={version}&terrain_revision=3"
+                      ],
+                      "projection": "EPSG:4326",
+                      "bounds": [
+                        0,
+                        -90,
+                        180,
+                        90
+                      ],
+                      "available": [
+                        [
+                          {
+                            "startX": 0,
+                            "startY": 0,
+                            "endX": 1,
+                            "endY": 0
+                          }
+                        ],
+                        [
+                          {
+                            "startX": 3,
+                            "startY": 0,
+                            "endX": 3,
+                            "endY": 0
+                          }
+                        ],
+                        [
+                          {
+                            "startX": 6,
+                            "startY": 1,
+                            "endX": 6,
+                            "endY": 1
+                          }
+                        ]
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "404": {
+            "description": "Unknown or unpublished layer (JSON), or a published layer whose `layer.json` is missing on disk (`text/plain` \"Metadata not found\").",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "message": "Not Found"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "Metadata not found"
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/geodata/terrain/{layerId}/{z}/{x}/{y}.terrain": {
+      "get": {
+        "tags": [
+          "Tiles"
+        ],
+        "operationId": "getTerrainTile",
+        "summary": "Terrain tile (quantized-mesh)",
+        "description": "One quantized-mesh-1.0 tile (TMS scheme, EPSG:4326) of a published terrain layer. Tiles are stored gzip-compressed and sent decompressed (the HTTP layer may re-compress them). Zoom levels follow the layer's `available` ranges (conversion range 0–15).\n\n**Role:** any signed-in user (`admin`, `engineering`).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TerrainLayerId"
+          },
+          {
+            "$ref": "#/components/parameters/TileZ"
+          },
+          {
+            "$ref": "#/components/parameters/TileX"
+          },
+          {
+            "$ref": "#/components/parameters/TileY"
+          },
+          {
+            "name": "v",
+            "in": "query",
+            "description": "Tileset version from `layer.json` (cache buster, ignored).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "terrain_revision",
+            "in": "query",
+            "description": "Tile revision (cache buster, ignored).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tile bytes.",
+            "headers": {
+              "Cache-Control": {
+                "description": "`public, max-age=604800` (7 days).",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "404": {
+            "description": "Unknown / unpublished layer or malformed path (JSON), or a tile outside the dataset (`text/plain` \"Terrain tile not found\", `Cache-Control: no-store`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "message": "Not Found"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "Terrain tile not found"
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/geodata/ortho/{layerId}_ortho/{z}/{x}/{y}.png": {
+      "get": {
+        "tags": [
+          "Tiles"
+        ],
+        "operationId": "getOrthoTile",
+        "summary": "Orthophoto tile (XYZ PNG)",
+        "description": "One 256 px XYZ (Web Mercator) PNG tile of a published terrain layer's orthophoto, as templated by `terrain_detail.ortho_tiles_url`. Available zooms: `ortho_min_zoom`–`ortho_max_zoom`.\n\n**Role:** any signed-in user (`admin`, `engineering`).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TerrainLayerId"
+          },
+          {
+            "$ref": "#/components/parameters/TileZ"
+          },
+          {
+            "$ref": "#/components/parameters/TileX"
+          },
+          {
+            "$ref": "#/components/parameters/TileY"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "PNG tile.",
+            "headers": {
+              "Cache-Control": {
+                "description": "`public, max-age=604800` (7 days).",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "404": {
+            "description": "Unknown / unpublished layer or malformed path (JSON), or a tile outside the orthophoto (empty body).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "message": "Not Found"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string",
+                  "maxLength": 0
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/geodata/vector/{layer}/data.json": {
+      "get": {
+        "tags": [
+          "Vector"
+        ],
+        "operationId": "getVectorGeoJson",
+        "summary": "Vector layer as GeoJSON",
+        "description": "Streams every feature of a published vector layer (its PostGIS table) as one GeoJSON FeatureCollection in WGS84. Large layers produce large responses; the body is streamed, so read it incrementally. A published layer without a vector table (e.g. a terrain layer) returns an empty collection.\n\n**Role:** any signed-in user (`admin`, `engineering`).",
+        "parameters": [
+          {
+            "name": "layer",
+            "in": "path",
+            "required": true,
+            "description": "Layer id.",
+            "schema": {
+              "$ref": "#/components/schemas/Ulid"
+            },
+            "example": "01JH8ZC4W6Y8A0B2D4F6H8K0M2"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Feature collection.",
+            "headers": {
+              "Cache-Control": {
+                "description": "`no-cache` (streamed responses).",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                },
+                "examples": {
+                  "features": {
+                    "summary": "Two features",
+                    "value": {
+                      "type": "FeatureCollection",
+                      "features": [
+                        {
+                          "type": "Feature",
+                          "id": 1,
+                          "geometry": {
+                            "type": "Point",
+                            "coordinates": [
+                              111.27007791,
+                              -0.63805738,
+                              1.839
+                            ]
+                          },
+                          "properties": {
+                            "name": "BH-01",
+                            "elevation": 1.839
+                          }
+                        },
+                        {
+                          "type": "Feature",
+                          "id": 2,
+                          "geometry": {
+                            "type": "LineString",
+                            "coordinates": [
+                              [
+                                111.26993934,
+                                -0.63790757
+                              ],
+                              [
+                                111.26985618,
+                                -0.63766186
+                              ]
+                            ]
+                          },
+                          "properties": {
+                            "name": "Haul road",
+                            "width_m": 12
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  "empty": {
+                    "summary": "No vector table",
+                    "value": {
+                      "type": "FeatureCollection",
+                      "features": []
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The layer's table name failed the safety check (corrupt layer metadata).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "invalidTable": {
+                    "summary": "Invalid table name pattern.",
+                    "value": {
+                      "message": "Invalid table name pattern."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/geodata/upload/sessions": {
+      "post": {
+        "tags": [
+          "Upload"
+        ],
+        "operationId": "startUploadSession",
+        "summary": "Start (or resume) an upload session",
+        "description": "Step 1 of the upload. Creates a session for one file, to be sent in 2 MB chunks. With a `requestId` the call is idempotent: repeating it returns the existing session (still 201), so a client that lost the response can retry safely.\n\nQuotas per user: at most 4 active sessions (uploading or queued) and 2000 MB in flight; the server also keeps 512 MB of disk free after reserving twice the file size.\n\nRate limit `upload-start`: 20/min. **Role:** `admin`.",
+        "requestBody": {
+          "required": true,
+          "description": "JSON (form-encoded bodies are accepted too).",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartUploadSessionRequest"
+              },
+              "examples": {
+                "dem": {
+                  "summary": "A DEM GeoTIFF",
+                  "value": {
+                    "fileName": "DEM_120722.tif",
+                    "fileSize": 5242880,
+                    "requestId": "6e0f8a52-2c47-4d1b-a3f9-7b5c1d2e3f40"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Session created, or the existing session of this `requestId`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadSessionResponse"
+                },
+                "examples": {
+                  "created": {
+                    "summary": "New session",
+                    "value": {
+                      "success": true,
+                      "session": {
+                        "identifier": "9f1c2d3e-4b5a-4c6d-8e7f-0a1b2c3d4e5f",
+                        "fileName": "DEM_120722.tif",
+                        "fileSize": 5242880,
+                        "chunkSize": 2097152,
+                        "totalChunks": 3,
+                        "chunks": {
+                          "0": "3f5d0b1a9c2e4d6f8a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f"
+                        },
+                        "status": "uploading",
+                        "job_id": null,
+                        "expiresAt": "2026-11-10T09:30:00+00:00"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/MalformedJson"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "`requestId` already used for a different file.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "requestIdReused": {
+                    "summary": "Upload request ID was used for a different file.",
+                    "value": {
+                      "message": "Upload request ID was used for a different file."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "The session of this `requestId` expired; use a new `requestId`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "expired": {
+                    "summary": "Upload expired.",
+                    "value": {
+                      "message": "Upload expired."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The user's active uploads would exceed 2000 MB.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "quota": {
+                    "summary": "Your active uploads exceed the storage quota.",
+                    "value": {
+                      "message": "Your active uploads exceed the storage quota."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "419": {
+            "$ref": "#/components/responses/CsrfMismatch"
+          },
+          "422": {
+            "description": "Invalid input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ValidationError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
+                },
+                "examples": {
+                  "required": {
+                    "summary": "Missing fields",
+                    "value": {
+                      "message": "The file name field is required.",
+                      "errors": {
+                        "fileName": [
+                          "The file name field is required."
+                        ],
+                        "fileSize": [
+                          "The file size field is required."
+                        ]
+                      }
+                    }
+                  },
+                  "unsupported": {
+                    "summary": "Unsupported format or unsafe file name.",
+                    "value": {
+                      "message": "Unsupported format or unsafe file name.",
+                      "errors": {
+                        "fileName": [
+                          "Unsupported format or unsafe file name."
+                        ]
+                      }
+                    }
+                  },
+                  "tooLarge": {
+                    "summary": "The file size field must not be greater than 1048576000.",
+                    "value": {
+                      "message": "The file size field must not be greater than 1048576000.",
+                      "errors": {
+                        "fileSize": [
+                          "The file size field must not be greater than 1048576000."
+                        ]
+                      }
+                    }
+                  },
+                  "badRequestId": {
+                    "summary": "The request id field must be a valid UUID.",
+                    "value": {
+                      "message": "The request id field must be a valid UUID.",
+                      "errors": {
+                        "requestId": [
+                          "The request id field must be a valid UUID."
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit `upload-start` (20/min, with `Retry-After`), or already 4 active sessions (no `Retry-After`: cancel or finish an upload first).",
+            "headers": {
+              "Retry-After": {
+                "$ref": "#/components/headers/RetryAfter"
+              },
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "rateLimited": {
+                    "summary": "Too Many Attempts.",
+                    "value": {
+                      "message": "Too Many Attempts."
+                    }
+                  },
+                  "tooManySessions": {
+                    "summary": "Too many active uploads.",
+                    "value": {
+                      "message": "Too many active uploads. Cancel an upload before starting another."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "507": {
+            "$ref": "#/components/responses/InsufficientStorage"
+          }
+        }
+      }
+    },
+    "/geodata/upload/sessions/{identifier}": {
+      "get": {
+        "tags": [
+          "Upload"
+        ],
+        "operationId": "getUploadSession",
+        "summary": "Upload session state (resume)",
+        "description": "The session's state, used to resume an interrupted upload: send only the chunk indexes missing from `chunks`. Only the session's owner can read it.\n\nRate limit `upload-status`: 120/min. **Role:** `admin`.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/UploadIdentifier"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session.",
+            "headers": {
+              "Cache-Control": {
+                "description": "`no-store`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadSessionResponse"
+                },
+                "examples": {
+                  "session": {
+                    "summary": "Uploading",
+                    "value": {
+                      "success": true,
+                      "session": {
+                        "identifier": "9f1c2d3e-4b5a-4c6d-8e7f-0a1b2c3d4e5f",
+                        "fileName": "DEM_120722.tif",
+                        "fileSize": 5242880,
+                        "chunkSize": 2097152,
+                        "totalChunks": 3,
+                        "chunks": {
+                          "0": "3f5d0b1a9c2e4d6f8a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f"
+                        },
+                        "status": "uploading",
+                        "job_id": null,
+                        "expiresAt": "2026-11-10T09:30:00+00:00"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "410": {
+            "description": "The unfinished session expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "expired": {
+                    "summary": "Upload expired.",
+                    "value": {
+                      "message": "Upload expired."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit `upload-status` (120 requests per minute per user) exceeded. Retry after `Retry-After` seconds.",
+            "headers": {
+              "Retry-After": {
+                "$ref": "#/components/headers/RetryAfter"
+              },
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "rateLimited": {
+                    "summary": "Too Many Attempts.",
+                    "value": {
+                      "message": "Too Many Attempts."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Upload"
+        ],
+        "operationId": "cancelUploadSession",
+        "summary": "Cancel an upload",
+        "description": "Cancels a session that was not submitted for processing yet and deletes its stored chunks. Cancelling a cancelled session succeeds again.\n\nRate limit `upload-start`: 20/min. **Role:** `admin`.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/UploadIdentifier"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancelled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                },
+                "examples": {
+                  "cancelled": {
+                    "summary": "Cancelled",
+                    "value": {
+                      "success": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "Already submitted for processing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "processing": {
+                    "summary": "Processing has already started.",
+                    "value": {
+                      "message": "Processing has already started."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "419": {
+            "$ref": "#/components/responses/CsrfMismatch"
+          },
+          "429": {
+            "description": "Rate limit `upload-start` (20 requests per minute per user) exceeded. Retry after `Retry-After` seconds.",
+            "headers": {
+              "Retry-After": {
+                "$ref": "#/components/headers/RetryAfter"
+              },
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "rateLimited": {
+                    "summary": "Too Many Attempts.",
+                    "value": {
+                      "message": "Too Many Attempts."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/geodata/upload/chunk": {
+      "post": {
+        "tags": [
+          "Upload"
+        ],
+        "operationId": "uploadChunk",
+        "summary": "Upload one chunk",
+        "description": "Step 2 of the upload. Send each chunk (`chunkSize` = 2 MB, the last one holds the remainder) with its SHA-256. Chunks may arrive in any order and in parallel; re-sending a stored chunk with the same checksum is a no-op, a different one is a 409. Each stored chunk extends the session's expiry.\n\nRate limit `upload-chunks`: 240/min. **Role:** `admin`.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/UploadChunkRequest"
+              },
+              "encoding": {
+                "file": {
+                  "contentType": "application/octet-stream"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Chunk stored.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                },
+                "examples": {
+                  "stored": {
+                    "summary": "Stored",
+                    "value": {
+                      "success": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "The session no longer accepts chunks, or another chunk is stored at this index.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "notWritable": {
+                    "summary": "This upload is no longer writable.",
+                    "value": {
+                      "message": "This upload is no longer writable."
+                    }
+                  },
+                  "differentChunk": {
+                    "summary": "A different chunk already exists at this index.",
+                    "value": {
+                      "message": "A different chunk already exists at this index."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "The session expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "expired": {
+                    "summary": "This upload expired. Please select the file again.",
+                    "value": {
+                      "message": "This upload expired. Please select the file again."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "419": {
+            "$ref": "#/components/responses/CsrfMismatch"
+          },
+          "422": {
+            "description": "Invalid input, or the chunk does not fit the session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ValidationError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
+                },
+                "examples": {
+                  "required": {
+                    "summary": "Missing fields",
+                    "value": {
+                      "message": "The file field is required.",
+                      "errors": {
+                        "file": [
+                          "The file field is required."
+                        ],
+                        "identifier": [
+                          "The identifier field is required."
+                        ],
+                        "chunkIndex": [
+                          "The chunk index field is required."
+                        ],
+                        "checksum": [
+                          "The checksum field is required."
+                        ]
+                      }
+                    }
+                  },
+                  "tooLarge": {
+                    "summary": "The file field must not be greater than 2048 kilobytes.",
+                    "value": {
+                      "message": "The file field must not be greater than 2048 kilobytes.",
+                      "errors": {
+                        "file": [
+                          "The file field must not be greater than 2048 kilobytes."
+                        ]
+                      }
+                    }
+                  },
+                  "badChecksum": {
+                    "summary": "The checksum field format is invalid.",
+                    "value": {
+                      "message": "The checksum field format is invalid.",
+                      "errors": {
+                        "checksum": [
+                          "The checksum field format is invalid."
+                        ]
+                      }
+                    }
+                  },
+                  "outOfRange": {
+                    "summary": "Chunk index is out of range.",
+                    "value": {
+                      "message": "Chunk index is out of range."
+                    }
+                  },
+                  "wrongSize": {
+                    "summary": "Chunk size does not match the upload session.",
+                    "value": {
+                      "message": "Chunk size does not match the upload session."
+                    }
+                  },
+                  "checksumMismatch": {
+                    "summary": "Chunk checksum mismatch.",
+                    "value": {
+                      "message": "Chunk checksum mismatch."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit `upload-chunks` (240 requests per minute per user) exceeded. Retry after `Retry-After` seconds.",
+            "headers": {
+              "Retry-After": {
+                "$ref": "#/components/headers/RetryAfter"
+              },
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "rateLimited": {
+                    "summary": "Too Many Attempts.",
+                    "value": {
+                      "message": "Too Many Attempts."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "507": {
+            "$ref": "#/components/responses/InsufficientStorage"
+          }
+        }
+      }
+    },
+    "/geodata/upload/assemble-raster": {
+      "post": {
+        "tags": [
+          "Upload"
+        ],
+        "operationId": "assembleRasterUpload",
+        "summary": "Submit a terrain upload (DEM + optional orthophoto)",
+        "description": "Step 3 for terrain: submits a completed DEM GeoTIFF session (and optionally an orthophoto GeoTIFF session). The worker assembles and verifies the files, then builds quantized-mesh terrain tiles and XYZ orthophoto tiles.\n\nCreates the layer (status `processing`) and a queued conversion job, and answers 202 with the job id to poll (step 4). Idempotent: repeating the request with the same parameters returns the same `job_id`; different parameters for an already submitted session are a 409. Verification failures (file signature, archive limits: 1000 entries, 2000 MB uncompressed, ratio 100:1) surface later as a `failed` job.\n\nRate limit `upload-start`: 20/min. **Role:** `admin`.",
+        "requestBody": {
+          "required": true,
+          "description": "JSON (form-encoded bodies are accepted too).",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssembleRasterRequest"
+              },
+              "examples": {
+                "demWithOrtho": {
+                  "summary": "DEM with orthophoto",
+                  "value": {
+                    "layerName": "DEM 12-07-2022",
+                    "demIdentifier": "9f1c2d3e-4b5a-4c6d-8e7f-0a1b2c3d4e5f",
+                    "orthoIdentifier": "3b2a1c0d-9e8f-4a7b-9c6d-5e4f3a2b1c0d",
+                    "acquisitionDate": "2022-07-12",
+                    "layer_category_id": "01JH8Y2B4D6F8H0K2M4P6R8T0V"
+                  }
+                },
+                "demOnly": {
+                  "summary": "DEM only",
+                  "value": {
+                    "layerName": "DEM 12-07-2022",
+                    "demIdentifier": "9f1c2d3e-4b5a-4c6d-8e7f-0a1b2c3d4e5f"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Queued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadQueuedResponse"
+                },
+                "examples": {
+                  "queued": {
+                    "summary": "Queued",
+                    "value": {
+                      "success": true,
+                      "message": "Upload queued for verification and processing.",
+                      "job_id": "01JH8Z9X2P1E3G5J7K9M1N3P5Q"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/MalformedJson"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "A session is incomplete, no longer writable, or was submitted with different parameters.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "incomplete": {
+                    "summary": "Upload is incomplete. Resume the missing chunks.",
+                    "value": {
+                      "message": "Upload is incomplete. Resume the missing chunks."
+                    }
+                  },
+                  "missingChunk": {
+                    "summary": "A required chunk is missing.",
+                    "value": {
+                      "message": "A required chunk is missing."
+                    }
+                  },
+                  "notWritable": {
+                    "summary": "This upload is no longer writable.",
+                    "value": {
+                      "message": "This upload is no longer writable."
+                    }
+                  },
+                  "differentParameters": {
+                    "summary": "Upload was already submitted with different parameters.",
+                    "value": {
+                      "message": "Upload was already submitted with different parameters."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "A session expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "expired": {
+                    "summary": "This upload expired. Please select the file again.",
+                    "value": {
+                      "message": "This upload expired. Please select the file again."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "419": {
+            "$ref": "#/components/responses/CsrfMismatch"
+          },
+          "422": {
+            "description": "Invalid input, or the files do not fit this workflow.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ValidationError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
+                },
+                "examples": {
+                  "required": {
+                    "summary": "Missing fields",
+                    "value": {
+                      "message": "The layer name field is required.",
+                      "errors": {
+                        "layerName": [
+                          "The layer name field is required."
+                        ],
+                        "demIdentifier": [
+                          "The dem identifier field is required."
+                        ]
+                      }
+                    }
+                  },
+                  "sameSession": {
+                    "summary": "The ortho identifier field and dem identifier must be different.",
+                    "value": {
+                      "message": "The ortho identifier field and dem identifier must be different.",
+                      "errors": {
+                        "orthoIdentifier": [
+                          "The ortho identifier field and dem identifier must be different."
+                        ]
+                      }
+                    }
+                  },
+                  "badDate": {
+                    "summary": "The acquisition date field must match the format Y-m-d.",
+                    "value": {
+                      "message": "The acquisition date field must match the format Y-m-d.",
+                      "errors": {
+                        "acquisitionDate": [
+                          "The acquisition date field must match the format Y-m-d."
+                        ]
+                      }
+                    }
+                  },
+                  "wrongFormat": {
+                    "summary": "File format does not match this upload workflow.",
+                    "value": {
+                      "message": "File format does not match this upload workflow."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit `upload-start` (20 requests per minute per user) exceeded. Retry after `Retry-After` seconds.",
+            "headers": {
+              "Retry-After": {
+                "$ref": "#/components/headers/RetryAfter"
+              },
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "rateLimited": {
+                    "summary": "Too Many Attempts.",
+                    "value": {
+                      "message": "Too Many Attempts."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "503": {
+            "description": "The job could not be queued (it is marked failed); try again later.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "queueDown": {
+                    "summary": "The upload could not be queued for processing. Please try again later.",
+                    "value": {
+                      "message": "The upload could not be queued for processing. Please try again later."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/geodata/upload/assemble-vector": {
+      "post": {
+        "tags": [
+          "Upload"
+        ],
+        "operationId": "assembleVectorUpload",
+        "summary": "Submit a vector upload",
+        "description": "Step 3 for vector data: submits a completed GeoJSON, zipped Shapefile (exactly one dataset with .shp, .shx, .dbf and .prj), DXF, DWG or Surpac STR session. The worker verifies the file and imports it into PostGIS. `sourceEpsg` is required for DXF, DWG and STR.\n\nCreates the layer (status `processing`) and a queued conversion job, and answers 202 with the job id to poll (step 4). Idempotent: repeating the request with the same parameters returns the same `job_id`; different parameters for an already submitted session are a 409. Verification failures (file signature, archive limits: 1000 entries, 2000 MB uncompressed, ratio 100:1) surface later as a `failed` job.\n\nRate limit `upload-start`: 20/min. **Role:** `admin`.",
+        "requestBody": {
+          "required": true,
+          "description": "JSON (form-encoded bodies are accepted too).",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssembleVectorRequest"
+              },
+              "examples": {
+                "str": {
+                  "summary": "Surpac STR (needs sourceEpsg)",
+                  "value": {
+                    "layerName": "Pit_design A",
+                    "identifier": "c7d8e9f0-1a2b-4c3d-9e4f-5a6b7c8d9e0f",
+                    "sourceEpsg": "EPSG:32649",
+                    "acquisitionDate": null,
+                    "layer_category_id": "01JH8Y2B4D6F8H0K2M4P6R8T0W"
+                  }
+                },
+                "geojson": {
+                  "summary": "GeoJSON",
+                  "value": {
+                    "layerName": "Boundary 2026",
+                    "identifier": "c7d8e9f0-1a2b-4c3d-9e4f-5a6b7c8d9e0f"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Queued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadQueuedResponse"
+                },
+                "examples": {
+                  "queued": {
+                    "summary": "Queued",
+                    "value": {
+                      "success": true,
+                      "message": "Upload queued for verification and processing.",
+                      "job_id": "01JH8ZC4W5R7T9V1X3Z5A7B9C1"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/MalformedJson"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "A session is incomplete, no longer writable, or was submitted with different parameters.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "incomplete": {
+                    "summary": "Upload is incomplete. Resume the missing chunks.",
+                    "value": {
+                      "message": "Upload is incomplete. Resume the missing chunks."
+                    }
+                  },
+                  "missingChunk": {
+                    "summary": "A required chunk is missing.",
+                    "value": {
+                      "message": "A required chunk is missing."
+                    }
+                  },
+                  "notWritable": {
+                    "summary": "This upload is no longer writable.",
+                    "value": {
+                      "message": "This upload is no longer writable."
+                    }
+                  },
+                  "differentParameters": {
+                    "summary": "Upload was already submitted with different parameters.",
+                    "value": {
+                      "message": "Upload was already submitted with different parameters."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "A session expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "expired": {
+                    "summary": "This upload expired. Please select the file again.",
+                    "value": {
+                      "message": "This upload expired. Please select the file again."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "419": {
+            "$ref": "#/components/responses/CsrfMismatch"
+          },
+          "422": {
+            "description": "Invalid input, or the files do not fit this workflow.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ValidationError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
+                },
+                "examples": {
+                  "required": {
+                    "summary": "Missing fields",
+                    "value": {
+                      "message": "The layer name field is required.",
+                      "errors": {
+                        "layerName": [
+                          "The layer name field is required."
+                        ],
+                        "identifier": [
+                          "The identifier field is required."
+                        ]
+                      }
+                    }
+                  },
+                  "badEpsg": {
+                    "summary": "The source epsg field format is invalid.",
+                    "value": {
+                      "message": "The source epsg field format is invalid.",
+                      "errors": {
+                        "sourceEpsg": [
+                          "The source epsg field format is invalid."
+                        ]
+                      }
+                    }
+                  },
+                  "badCategory": {
+                    "summary": "The selected layer category id is invalid.",
+                    "value": {
+                      "message": "The selected layer category id is invalid.",
+                      "errors": {
+                        "layer_category_id": [
+                          "The selected layer category id is invalid."
+                        ]
+                      }
+                    }
+                  },
+                  "wrongFormat": {
+                    "summary": "File format does not match this upload workflow.",
+                    "value": {
+                      "message": "File format does not match this upload workflow."
+                    }
+                  },
+                  "epsgRequired": {
+                    "summary": "Source EPSG is required for CAD/STR files.",
+                    "value": {
+                      "message": "Source EPSG is required for CAD/STR files."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit `upload-start` (20 requests per minute per user) exceeded. Retry after `Retry-After` seconds.",
+            "headers": {
+              "Retry-After": {
+                "$ref": "#/components/headers/RetryAfter"
+              },
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "rateLimited": {
+                    "summary": "Too Many Attempts.",
+                    "value": {
+                      "message": "Too Many Attempts."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "503": {
+            "description": "The job could not be queued (it is marked failed); try again later.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "queueDown": {
+                    "summary": "The upload could not be queued for processing. Please try again later.",
+                    "value": {
+                      "message": "The upload could not be queued for processing. Please try again later."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/geodata/upload/status/{job}": {
+      "get": {
+        "tags": [
+          "Upload"
+        ],
+        "operationId": "getUploadStatus",
+        "summary": "Conversion job status (polling)",
+        "description": "Step 4 of the upload: poll until `status` is `done` (the response then includes the new layer and source file) or `failed`. Only the uploader of the job's layer can read it; other jobs are a 404.\n\nRate limit `upload-status`: 120/min. **Role:** `admin`.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/JobId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadStatusResponse"
+                },
+                "examples": {
+                  "processing": {
+                    "summary": "Processing",
+                    "value": {
+                      "success": true,
+                      "status": "processing",
+                      "error_message": null,
+                      "finished_at": null
+                    }
+                  },
+                  "doneTerrain": {
+                    "summary": "Done (terrain)",
+                    "value": {
+                      "success": true,
+                      "status": "done",
+                      "error_message": null,
+                      "finished_at": "2026-11-09T16:53:34+00:00",
+                      "layer": {
+                        "id": "01JH8Z9X2Q4K7M3N5P6R8S9T0V",
+                        "name": "DEM 12-07-2022",
+                        "type": "terrain",
+                        "created_at": "8 minutes ago",
+                        "terrain_detail": {
+                          "tileset_url": "/geodata/terrain/01JH8Z9X2Q4K7M3N5P6R8S9T0V",
+                          "has_ortho": true,
+                          "native_bounding_box": {
+                            "east": 117.2635039,
+                            "west": 117.2551064,
+                            "north": -0.659641,
+                            "south": -0.6645944
+                          },
+                          "acquisition_date": "12 Jul 2022",
+                          "has_ortho_tiles": true,
+                          "ortho_tiles_url": "/geodata/ortho/01JH8Z9X2Q4K7M3N5P6R8S9T0V_ortho/{z}/{x}/{y}.png",
+                          "ortho_min_zoom": 10,
+                          "ortho_max_zoom": 20
+                        }
+                      },
+                      "source_file": {
+                        "name": "DEM_120722.tif",
+                        "size": 698081
+                      }
+                    }
+                  },
+                  "doneVector": {
+                    "summary": "Done (vector)",
+                    "value": {
+                      "success": true,
+                      "status": "done",
+                      "error_message": null,
+                      "finished_at": "2026-11-09T16:55:36+00:00",
+                      "layer": {
+                        "id": "01JH8ZC4W6Y8A0B2D4F6H8K0M2",
+                        "name": "Pit_design A",
+                        "type": "vector",
+                        "created_at": "6 minutes ago",
+                        "vector_detail": {
+                          "geometry_type": "Point",
+                          "feature_count": 34717,
+                          "native_bounding_box": {
+                            "east": 111.28018581,
+                            "west": 111.25785334,
+                            "north": -0.62101633,
+                            "south": -0.65046553
+                          },
+                          "acquisition_date": "N/A"
+                        }
+                      },
+                      "source_file": {
+                        "name": "pit_design_a.str",
+                        "size": 3896925
+                      }
+                    }
+                  },
+                  "failed": {
+                    "summary": "Failed",
+                    "value": {
+                      "success": true,
+                      "status": "failed",
+                      "error_message": "File processing failed. Please contact an administrator with the job ID.",
+                      "finished_at": "2026-11-09T16:58:02+00:00"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "description": "Rate limit `upload-status` (120 requests per minute per user) exceeded. Retry after `Retry-After` seconds.",
+            "headers": {
+              "Retry-After": {
+                "$ref": "#/components/headers/RetryAfter"
+              },
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "rateLimited": {
+                    "summary": "Too Many Attempts.",
+                    "value": {
+                      "message": "Too Many Attempts."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/up": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "operationId": "healthCheck",
+        "summary": "Health check",
+        "description": "200 when the app can reach the database, 503 otherwise. No authentication; suitable for load balancers.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Up.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatus"
+                },
+                "examples": {
+                  "up": {
+                    "summary": "Up",
+                    "value": {
+                      "status": "up"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Database unreachable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatus"
+                },
+                "examples": {
+                  "down": {
+                    "summary": "Down",
+                    "value": {
+                      "status": "down"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/api-docs/openapi.json": {
+      "get": {
+        "tags": [
+          "Docs"
+        ],
+        "operationId": "getOpenApiDocument",
+        "summary": "This OpenAPI document",
+        "description": "The OpenAPI 3.1 document rendered at `/api/api-docs`. Limits in it follow the server's configuration.\n\n**Role:** any signed-in user (`admin`, `engineering`).",
+        "responses": {
+          "200": {
+            "description": "OpenAPI document.",
+            "headers": {
+              "Cache-Control": {
+                "description": "`no-store`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "openapi",
+                    "info",
+                    "paths"
+                  ]
+                }
+              }
+            }
+          },
+          "307": {
+            "description": "No session cookie: redirect to the login page (`/login?redirect=...`).",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "description": "Error body of every `/geodata/*` endpoint.",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "examples": [
+              "Not Found"
+            ]
+          }
+        }
+      },
+      "ValidationError": {
+        "type": "object",
+        "description": "422 body (Laravel format): the first message plus every invalid field with its messages.",
+        "required": [
+          "message",
+          "errors"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "examples": [
+              "The layer name field is required."
+            ]
+          },
+          "errors": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            },
+            "examples": [
+              {
+                "layerName": [
+                  "The layer name field is required."
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "Success": {
+        "type": "object",
+        "required": [
+          "success"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "const": true
+          }
+        }
+      },
+      "Ulid": {
+        "type": "string",
+        "pattern": "^[0-9A-Za-z]{26}$",
+        "description": "ULID (26 characters).",
+        "examples": [
+          "01JH8Z9X2Q4K7M3N5P6R8S9T0V"
+        ]
+      },
+      "UploadIdentifier": {
+        "type": "string",
+        "format": "uuid",
+        "description": "Upload session id (UUID) returned by `POST /geodata/upload/sessions`.",
+        "examples": [
+          "9f1c2d3e-4b5a-4c6d-8e7f-0a1b2c3d4e5f"
+        ]
+      },
+      "LayerType": {
+        "type": "string",
+        "enum": [
+          "terrain",
+          "vector",
+          "imagery"
+        ],
+        "description": "`terrain` (DEM + optional orthophoto) or `vector`. `imagery` is reserved and not produced by uploads."
+      },
+      "JobStatus": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "processing",
+          "done",
+          "failed"
+        ],
+        "description": "Conversion job status: `queued` → `processing` → `done` or `failed`."
+      },
+      "UploadSessionStatus": {
+        "type": "string",
+        "enum": [
+          "uploading",
+          "queued",
+          "assembled",
+          "failed",
+          "cancelled"
+        ],
+        "description": "`uploading` accepts chunks; `queued` / `assembled` were submitted for processing; `failed` and `cancelled` are final."
+      },
+      "UserRole": {
+        "type": "string",
+        "enum": [
+          "admin",
+          "engineering"
+        ],
+        "description": "`admin`: full access. `engineering`: read-only geodata."
+      },
+      "BoundingBox": {
+        "type": "object",
+        "description": "Extent in WGS84 degrees.",
+        "required": [
+          "west",
+          "south",
+          "east",
+          "north"
+        ],
+        "properties": {
+          "west": {
+            "type": "number"
+          },
+          "south": {
+            "type": "number"
+          },
+          "east": {
+            "type": "number"
+          },
+          "north": {
+            "type": "number"
+          }
+        }
+      },
+      "Category": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "color",
+          "icon_url"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Ulid"
+          },
+          "name": {
+            "type": "string",
+            "examples": [
+              "Terrain & Orthophoto"
+            ]
+          },
+          "slug": {
+            "type": "string",
+            "examples": [
+              "terrain-orthophoto"
+            ]
+          },
+          "color": {
+            "type": "string",
+            "description": "CSS hex colour.",
+            "examples": [
+              "#0ea5e9"
+            ]
+          },
+          "icon_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Uploaded icon (`GET /geodata/icons/layer-categories/{icon}`), or null for the default icon.",
+            "examples": [
+              "/geodata/icons/layer-categories/q8ZtR2mXk4Wv.webp"
+            ]
+          }
+        }
+      },
+      "TerrainDetail": {
+        "type": "object",
+        "required": [
+          "tileset_url",
+          "has_ortho",
+          "native_bounding_box",
+          "acquisition_date",
+          "has_ortho_tiles",
+          "ortho_tiles_url",
+          "ortho_min_zoom",
+          "ortho_max_zoom"
+        ],
+        "properties": {
+          "tileset_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Base URL of the quantized-mesh tileset (same origin); Cesium loads `{tileset_url}/layer.json`.",
+            "examples": [
+              "/geodata/terrain/01JH8Z9X2Q4K7M3N5P6R8S9T0V"
+            ]
+          },
+          "has_ortho": {
+            "type": "boolean",
+            "description": "An orthophoto was uploaded with the DEM."
+          },
+          "native_bounding_box": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BoundingBox"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "acquisition_date": {
+            "type": "string",
+            "description": "Acquisition date as \"d M Y\" (UTC), or \"N/A\" when none was given.",
+            "examples": [
+              "12 Jul 2022",
+              "N/A"
+            ]
+          },
+          "has_ortho_tiles": {
+            "type": "boolean",
+            "description": "Orthophoto XYZ tiles were generated."
+          },
+          "ortho_tiles_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "XYZ URL template of the orthophoto tiles.",
+            "examples": [
+              "/geodata/ortho/01JH8Z9X2Q4K7M3N5P6R8S9T0V_ortho/{z}/{x}/{y}.png"
+            ]
+          },
+          "ortho_min_zoom": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "examples": [
+              10
+            ]
+          },
+          "ortho_max_zoom": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "examples": [
+              20
+            ]
+          }
+        }
+      },
+      "VectorDetail": {
+        "type": "object",
+        "required": [
+          "geometry_type",
+          "feature_count",
+          "native_bounding_box",
+          "acquisition_date"
+        ],
+        "properties": {
+          "geometry_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Dominant PostGIS geometry type.",
+            "examples": [
+              "Point",
+              "LineString",
+              "MultiPolygon"
+            ]
+          },
+          "feature_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "native_bounding_box": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BoundingBox"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "acquisition_date": {
+            "type": "string",
+            "description": "Acquisition date as \"d M Y\" (UTC), or \"N/A\" when none was given.",
+            "examples": [
+              "12 Jul 2022",
+              "N/A"
+            ]
+          }
+        }
+      },
+      "Layer": {
+        "type": "object",
+        "description": "A published layer. `terrain_detail` is present on terrain layers, `vector_detail` on vector layers.",
+        "required": [
+          "id",
+          "name",
+          "layer_type",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Ulid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "layer_type": {
+            "$ref": "#/components/schemas/LayerType"
+          },
+          "created_at": {
+            "type": "string",
+            "pattern": "^[0-9]{2} [A-Z][a-z]{2} [0-9]{4}$",
+            "description": "Upload date.",
+            "examples": [
+              "09 Nov 2026"
+            ]
+          },
+          "terrain_detail": {
+            "$ref": "#/components/schemas/TerrainDetail"
+          },
+          "vector_detail": {
+            "$ref": "#/components/schemas/VectorDetail"
+          }
+        }
+      },
+      "CategoryWithLayers": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Category"
+          },
+          {
+            "type": "object",
+            "required": [
+              "layers"
+            ],
+            "properties": {
+              "layers": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Layer"
+                },
+                "minItems": 1,
+                "description": "Newest first."
+              }
+            }
+          }
+        ]
+      },
+      "LayerListResponse": {
+        "type": "object",
+        "required": [
+          "success",
+          "categories"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "const": true
+          },
+          "categories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CategoryWithLayers"
+            },
+            "description": "Categories in their sort order; categories without matching layers are left out."
+          }
+        }
+      },
+      "TerrainLayerSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "terrain_detail"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Ulid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "terrain_detail": {
+            "anyOf": [
+              {
+                "type": "object",
+                "required": [
+                  "tileset_url",
+                  "acquisition_date"
+                ],
+                "properties": {
+                  "tileset_url": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "examples": [
+                      "/geodata/terrain/01JH8Z9X2Q4K7M3N5P6R8S9T0V"
+                    ]
+                  },
+                  "acquisition_date": {
+                    "type": "string",
+                    "description": "Acquisition date as \"d M Y\" (UTC), or \"N/A\" when none was given.",
+                    "examples": [
+                      "12 Jul 2022",
+                      "N/A"
+                    ]
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "TerrainLayerListResponse": {
+        "type": "object",
+        "required": [
+          "success",
+          "layers"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "const": true
+          },
+          "layers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TerrainLayerSummary"
+            },
+            "description": "Newest first."
+          }
+        }
+      },
+      "CategoryListResponse": {
+        "type": "object",
+        "required": [
+          "success",
+          "categories"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "const": true
+          },
+          "categories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Category"
+            }
+          }
+        }
+      },
+      "RecentUpload": {
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "status_label",
+          "layer_type",
+          "layer_name",
+          "time_diff",
+          "is_done",
+          "is_failed"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Ulid",
+            "description": "Conversion job id."
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          },
+          "status_label": {
+            "type": "string",
+            "examples": [
+              "Processing"
+            ]
+          },
+          "layer_type": {
+            "$ref": "#/components/schemas/LayerType"
+          },
+          "layer_name": {
+            "type": "string",
+            "description": "Layer name, else the uploaded file name, else \"Processing...\"."
+          },
+          "time_diff": {
+            "type": "string",
+            "description": "Since the job finished (or was created). Human-readable relative time (Carbon diffForHumans), not machine-parseable.",
+            "examples": [
+              "5 minutes ago"
+            ]
+          },
+          "is_done": {
+            "type": "boolean"
+          },
+          "is_failed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "RecentUploadsResponse": {
+        "type": "object",
+        "required": [
+          "success",
+          "jobs"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "const": true
+          },
+          "jobs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RecentUpload"
+            },
+            "maxItems": 10,
+            "description": "The 10 newest conversion jobs."
+          }
+        }
+      },
+      "LayerDeletedResponse": {
+        "type": "object",
+        "required": [
+          "success",
+          "message"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "const": true
+          },
+          "message": {
+            "type": "string",
+            "const": "Layer deleted."
+          }
+        }
+      },
+      "LayerBusyResponse": {
+        "type": "object",
+        "required": [
+          "success",
+          "message"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "const": false
+          },
+          "message": {
+            "type": "string",
+            "examples": [
+              "This layer is still being processed. Wait until its conversion finishes or fails before deleting it."
+            ]
+          }
+        }
+      },
+      "TileAvailability": {
+        "type": "object",
+        "required": [
+          "startX",
+          "startY",
+          "endX",
+          "endY"
+        ],
+        "properties": {
+          "startX": {
+            "type": "integer"
+          },
+          "startY": {
+            "type": "integer"
+          },
+          "endX": {
+            "type": "integer"
+          },
+          "endY": {
+            "type": "integer"
+          }
+        }
+      },
+      "TerrainLayerJson": {
+        "type": "object",
+        "description": "Quantized-mesh `layer.json` written by Cesium Terrain Builder. The server appends `terrain_revision=<n>` to each `tiles` template so browsers drop tiles cached before a regeneration.",
+        "required": [
+          "format",
+          "tiles"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "tilejson": {
+            "type": "string",
+            "examples": [
+              "2.1.0"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string",
+            "examples": [
+              "1.1.0"
+            ]
+          },
+          "format": {
+            "type": "string",
+            "examples": [
+              "quantized-mesh-1.0"
+            ]
+          },
+          "attribution": {
+            "type": "string"
+          },
+          "schema": {
+            "type": "string",
+            "examples": [
+              "tms"
+            ]
+          },
+          "extensions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "examples": [
+              [
+                "octvertexnormals"
+              ]
+            ]
+          },
+          "tiles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tile URL templates relative to the tileset URL.",
+            "examples": [
+              [
+                "{z}/{x}/{y}.terrain?v={version}&terrain_revision=3"
+              ]
+            ]
+          },
+          "projection": {
+            "type": "string",
+            "examples": [
+              "EPSG:4326"
+            ]
+          },
+          "bounds": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 4,
+            "maxItems": 4
+          },
+          "available": {
+            "type": "array",
+            "description": "Per zoom level, the tile ranges that exist.",
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/TileAvailability"
+              }
+            }
+          }
+        }
+      },
+      "GeoJsonGeometry": {
+        "type": "object",
+        "description": "GeoJSON geometry in WGS84 (from PostGIS `ST_AsGeoJSON`); coordinates may carry a Z value.",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "Point",
+              "MultiPoint",
+              "LineString",
+              "MultiLineString",
+              "Polygon",
+              "MultiPolygon",
+              "GeometryCollection"
+            ]
+          },
+          "coordinates": {
+            "type": "array"
+          },
+          "geometries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GeoJsonGeometry"
+            }
+          }
+        }
+      },
+      "GeoJsonFeature": {
+        "type": "object",
+        "required": [
+          "type",
+          "id",
+          "geometry",
+          "properties"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "Feature"
+          },
+          "id": {
+            "type": [
+              "integer",
+              "string",
+              "null"
+            ],
+            "description": "Row id in the layer's PostGIS table."
+          },
+          "geometry": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GeoJsonGeometry"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "properties": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Attribute columns of the source file (the internal `attr_` prefix is removed)."
+          }
+        }
+      },
+      "FeatureCollection": {
+        "type": "object",
+        "required": [
+          "type",
+          "features"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "FeatureCollection"
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GeoJsonFeature"
+            }
+          }
+        }
+      },
+      "UploadSession": {
+        "type": "object",
+        "required": [
+          "identifier",
+          "fileName",
+          "fileSize",
+          "chunkSize",
+          "totalChunks",
+          "chunks",
+          "status",
+          "job_id",
+          "expiresAt"
+        ],
+        "properties": {
+          "identifier": {
+            "$ref": "#/components/schemas/UploadIdentifier"
+          },
+          "fileName": {
+            "type": "string"
+          },
+          "fileSize": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Bytes."
+          },
+          "chunkSize": {
+            "type": "integer",
+            "description": "Bytes per chunk (2 MB); the last chunk holds the remainder.",
+            "examples": [
+              2097152
+            ]
+          },
+          "totalChunks": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "`ceil(fileSize / chunkSize)`."
+          },
+          "chunks": {
+            "type": "object",
+            "description": "Chunks already stored: chunk index → SHA-256 hex of its bytes. Upload only the missing indexes when resuming.",
+            "propertyNames": {
+              "pattern": "^[0-9]+$"
+            },
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "status": {
+            "$ref": "#/components/schemas/UploadSessionStatus"
+          },
+          "job_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9A-Za-z]{26}$",
+            "description": "Conversion job id once the upload was submitted."
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When an unfinished session expires (24 h after creation or the last stored chunk)."
+          }
+        }
+      },
+      "UploadSessionResponse": {
+        "type": "object",
+        "required": [
+          "success",
+          "session"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "const": true
+          },
+          "session": {
+            "$ref": "#/components/schemas/UploadSession"
+          }
+        }
+      },
+      "StartUploadSessionRequest": {
+        "type": "object",
+        "required": [
+          "fileName",
+          "fileSize"
+        ],
+        "properties": {
+          "fileName": {
+            "type": "string",
+            "maxLength": 255,
+            "description": "Original file name (at most 255 bytes, no control characters or `<>:\"/\\|?*`). Allowed extensions: `.tif`, `.tiff`, `.geotiff`, `.geojson`, `.dxf`, `.dwg`, `.str`, `.zip`.",
+            "examples": [
+              "DEM_120722.tif"
+            ]
+          },
+          "fileSize": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1048576000,
+            "description": "File size in bytes, at most 1000 MB (GEODATA_MAX_UPLOAD_MB).",
+            "examples": [
+              5242880
+            ]
+          },
+          "requestId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Client-generated idempotency key for this file. Repeating a request with the same `requestId` returns the existing session (409 if the file name or size differ). Omit it to always create a new session.",
+            "examples": [
+              "6e0f8a52-2c47-4d1b-a3f9-7b5c1d2e3f40"
+            ]
+          }
+        }
+      },
+      "UploadChunkRequest": {
+        "type": "object",
+        "required": [
+          "file",
+          "identifier",
+          "chunkIndex",
+          "checksum"
+        ],
+        "properties": {
+          "file": {
+            "type": "string",
+            "format": "binary",
+            "contentMediaType": "application/octet-stream",
+            "description": "The chunk bytes: exactly `min(chunkSize, fileSize - chunkIndex * chunkSize)` bytes, at most 2048 KB."
+          },
+          "identifier": {
+            "$ref": "#/components/schemas/UploadIdentifier"
+          },
+          "chunkIndex": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Zero-based chunk index, below `totalChunks`."
+          },
+          "checksum": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "description": "Lowercase hex SHA-256 of the chunk bytes.",
+            "examples": [
+              "3f5d0b1a9c2e4d6f8a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f"
+            ]
+          }
+        }
+      },
+      "AssembleRasterRequest": {
+        "type": "object",
+        "description": "Unknown fields are ignored.",
+        "required": [
+          "layerName",
+          "demIdentifier"
+        ],
+        "properties": {
+          "layerName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "description": "Name of the new layer."
+          },
+          "sourceEpsg": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^EPSG:[1-9][0-9]{2,6}$",
+            "description": "Source coordinate reference system as `EPSG:<code>`. Required for CAD / Surpac files (`.dxf`, `.dwg`, `.str`); GeoTIFF, GeoJSON and Shapefile uploads carry their own CRS.",
+            "examples": [
+              "EPSG:32649"
+            ]
+          },
+          "acquisitionDate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date",
+            "description": "Survey / acquisition date as `YYYY-MM-DD`.",
+            "examples": [
+              "2022-07-12"
+            ]
+          },
+          "layer_category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9A-Za-z]{26}$",
+            "description": "Id of an existing layer category (`GET /geodata/layer-categories`). Empty or null files the layer under \"Other\".",
+            "examples": [
+              "01JH8Y2B4D6F8H0K2M4P6R8T0V"
+            ]
+          },
+          "demIdentifier": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Completed upload session of the DEM GeoTIFF (`.tif`, `.tiff`, `.geotiff`).",
+            "examples": [
+              "9f1c2d3e-4b5a-4c6d-8e7f-0a1b2c3d4e5f"
+            ]
+          },
+          "orthoIdentifier": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Optional completed upload session of an orthophoto GeoTIFF; must differ from `demIdentifier`.",
+            "examples": [
+              "3b2a1c0d-9e8f-4a7b-9c6d-5e4f3a2b1c0d"
+            ]
+          }
+        }
+      },
+      "AssembleVectorRequest": {
+        "type": "object",
+        "description": "Unknown fields are ignored.",
+        "required": [
+          "layerName",
+          "identifier"
+        ],
+        "properties": {
+          "layerName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "description": "Name of the new layer."
+          },
+          "sourceEpsg": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^EPSG:[1-9][0-9]{2,6}$",
+            "description": "Source coordinate reference system as `EPSG:<code>`. Required for CAD / Surpac files (`.dxf`, `.dwg`, `.str`); GeoTIFF, GeoJSON and Shapefile uploads carry their own CRS.",
+            "examples": [
+              "EPSG:32649"
+            ]
+          },
+          "acquisitionDate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date",
+            "description": "Survey / acquisition date as `YYYY-MM-DD`.",
+            "examples": [
+              "2022-07-12"
+            ]
+          },
+          "layer_category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9A-Za-z]{26}$",
+            "description": "Id of an existing layer category (`GET /geodata/layer-categories`). Empty or null files the layer under \"Other\".",
+            "examples": [
+              "01JH8Y2B4D6F8H0K2M4P6R8T0V"
+            ]
+          },
+          "identifier": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Completed upload session of the vector file (`.geojson`, `.zip` Shapefile, `.dxf`, `.dwg`, `.str`).",
+            "examples": [
+              "c7d8e9f0-1a2b-4c3d-9e4f-5a6b7c8d9e0f"
+            ]
+          }
+        }
+      },
+      "UploadQueuedResponse": {
+        "type": "object",
+        "required": [
+          "success",
+          "message",
+          "job_id"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "const": true
+          },
+          "message": {
+            "type": "string",
+            "const": "Upload queued for verification and processing."
+          },
+          "job_id": {
+            "$ref": "#/components/schemas/Ulid",
+            "description": "Conversion job id to poll with `GET /geodata/upload/status/{job}`."
+          }
+        }
+      },
+      "UploadedLayer": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "type",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Ulid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "$ref": "#/components/schemas/LayerType"
+          },
+          "created_at": {
+            "type": "string",
+            "description": "Since the layer was created. Human-readable relative time (Carbon diffForHumans), not machine-parseable.",
+            "examples": [
+              "5 minutes ago"
+            ]
+          },
+          "terrain_detail": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TerrainDetail"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "vector_detail": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VectorDetail"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "UploadStatusResponse": {
+        "type": "object",
+        "description": "`layer` and `source_file` are only present once `status` is `done`.",
+        "required": [
+          "success",
+          "status",
+          "error_message",
+          "finished_at"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "const": true
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          },
+          "error_message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Generic message when `status` is `failed` (details are in the server's conversion logs).",
+            "examples": [
+              "File processing failed. Please contact an administrator with the job ID."
+            ]
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "layer": {
+            "$ref": "#/components/schemas/UploadedLayer"
+          },
+          "source_file": {
+            "type": "object",
+            "required": [
+              "name",
+              "size"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "size": {
+                "type": "integer",
+                "description": "Bytes."
+              }
+            }
+          }
+        }
+      },
+      "HealthStatus": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "up",
+              "down"
+            ]
+          }
+        }
+      },
+      "CsrfTokenResponse": {
+        "type": "object",
+        "required": [
+          "csrfToken"
+        ],
+        "properties": {
+          "csrfToken": {
+            "type": "string",
+            "examples": [
+              "c475adb775d3008696770132c5967c71da3acbde6f8eb61539fc4246d9cff367"
+            ]
+          }
+        }
+      },
+      "CredentialsSignInRequest": {
+        "type": "object",
+        "required": [
+          "csrfToken",
+          "id_user",
+          "password"
+        ],
+        "properties": {
+          "csrfToken": {
+            "type": "string",
+            "description": "Token from `GET /api/auth/csrf` (send its `next-auth.csrf-token` cookie too)."
+          },
+          "id_user": {
+            "type": "string",
+            "maxLength": 255,
+            "description": "Username or email (case-insensitive).",
+            "examples": [
+              "admin"
+            ]
+          },
+          "password": {
+            "type": "string",
+            "format": "password",
+            "writeOnly": true
+          },
+          "remember": {
+            "type": "string",
+            "enum": [
+              "true",
+              "false",
+              "on"
+            ],
+            "default": "false",
+            "description": "`true` / `on` keeps the session for 30 days; otherwise it ends after 120 idle minutes (SESSION_LIFETIME)."
+          },
+          "json": {
+            "type": "string",
+            "const": "true",
+            "description": "Answer with `{ url }` JSON instead of a 302 redirect. Always send it from API clients."
+          },
+          "callbackUrl": {
+            "type": "string",
+            "description": "Where `url` should point after signing in (same origin).",
+            "examples": [
+              "/"
+            ]
+          }
+        }
+      },
+      "SignOutRequest": {
+        "type": "object",
+        "required": [
+          "csrfToken"
+        ],
+        "properties": {
+          "csrfToken": {
+            "type": "string"
+          },
+          "json": {
+            "type": "string",
+            "const": "true"
+          },
+          "callbackUrl": {
+            "type": "string",
+            "examples": [
+              "/login"
+            ]
+          }
+        }
+      },
+      "AuthUrlResponse": {
+        "type": "object",
+        "description": "NextAuth's JSON answer (`json=true`): where a browser would be redirected.",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri"
+          }
+        }
+      },
+      "SessionUser": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "email",
+          "image",
+          "username",
+          "role"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "image": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Profile photo URL."
+          },
+          "username": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/UserRole"
+          }
+        }
+      },
+      "Session": {
+        "type": "object",
+        "required": [
+          "user",
+          "expires"
+        ],
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/SessionUser"
+          },
+          "expires": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Cookie expiry (30 days, renewed while active)."
+          }
+        }
+      },
+      "InvalidSession": {
+        "type": "object",
+        "description": "The token is still present but its user was deleted or changed password: sign in again.",
+        "required": [
+          "expires",
+          "invalid"
+        ],
+        "properties": {
+          "expires": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "invalid": {
+            "type": "boolean",
+            "const": true
+          }
+        }
+      },
+      "AuthProvider": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "type",
+          "signinUrl",
+          "callbackUrl"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "examples": [
+              "credentials",
+              "github"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "examples": [
+              "Username",
+              "GitHub"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "credentials",
+              "oauth"
+            ]
+          },
+          "signinUrl": {
+            "type": "string",
+            "format": "uri"
+          },
+          "callbackUrl": {
+            "type": "string",
+            "format": "uri"
+          }
+        }
+      },
+      "AuthProviders": {
+        "type": "object",
+        "description": "Enabled sign-in providers keyed by id. OAuth providers appear only when their client id and secret are configured.",
+        "additionalProperties": {
+          "$ref": "#/components/schemas/AuthProvider"
+        }
+      }
+    },
+    "securitySchemes": {
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "next-auth.session-token",
+        "description": "NextAuth JWT session cookie from `POST /api/auth/callback/credentials`. Named `__Secure-next-auth.session-token` when the app runs over HTTPS. Browsers send it automatically on this page."
+      }
+    },
+    "parameters": {
+      "TerrainLayerId": {
+        "name": "layerId",
+        "in": "path",
+        "required": true,
+        "description": "Id of a published terrain layer.",
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9A-Za-z]{26}$"
+        },
+        "example": "01JH8Z9X2Q4K7M3N5P6R8S9T0V"
+      },
+      "LayerUlid": {
+        "name": "layer",
+        "in": "path",
+        "required": true,
+        "description": "Layer id.",
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$"
+        },
+        "example": "01JH8Z9X2Q4K7M3N5P6R8S9T0V"
+      },
+      "TileZ": {
+        "name": "z",
+        "in": "path",
+        "required": true,
+        "description": "Zoom level.",
+        "schema": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 99
+        },
+        "example": 10
+      },
+      "TileX": {
+        "name": "x",
+        "in": "path",
+        "required": true,
+        "description": "Tile column.",
+        "schema": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999999999
+        },
+        "example": 845
+      },
+      "TileY": {
+        "name": "y",
+        "in": "path",
+        "required": true,
+        "description": "Tile row.",
+        "schema": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999999999
+        },
+        "example": 513
+      },
+      "UploadIdentifier": {
+        "name": "identifier",
+        "in": "path",
+        "required": true,
+        "description": "Upload session id.",
+        "schema": {
+          "$ref": "#/components/schemas/UploadIdentifier"
+        },
+        "example": "9f1c2d3e-4b5a-4c6d-8e7f-0a1b2c3d4e5f"
+      },
+      "JobId": {
+        "name": "job",
+        "in": "path",
+        "required": true,
+        "description": "Conversion job id (`job_id`).",
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$"
+        },
+        "example": "01JH8Z9X2P1E3G5J7K9M1N3P5Q"
+      }
+    },
+    "headers": {
+      "RetryAfter": {
+        "description": "Seconds until the rate-limit window resets.",
+        "schema": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "RateLimitLimit": {
+        "description": "Requests allowed per minute.",
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "RateLimitRemaining": {
+        "description": "Requests left in the window (always 0 on a 429).",
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "SessionCookie": {
+        "description": "`next-auth.session-token=<jwt>; Path=/; HttpOnly; SameSite=Lax` (plus `Secure` and the `__Secure-` prefix over HTTPS).",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "CsrfCookie": {
+        "description": "`next-auth.csrf-token=<token>|<hash>; Path=/; HttpOnly; SameSite=Lax`.",
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "responses": {
+      "Unauthenticated": {
+        "description": "Not signed in, or the session was revoked.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "examples": {
+              "unauthenticated": {
+                "summary": "Unauthenticated.",
+                "value": {
+                  "message": "Unauthenticated."
+                }
+              }
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "The user's role may not call this endpoint.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "examples": {
+              "forbidden": {
+                "summary": "This action is unauthorized.",
+                "value": {
+                  "message": "This action is unauthorized."
+                }
+              }
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Not found (also: not published, malformed id, or owned by another user).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "examples": {
+              "notFound": {
+                "summary": "Not Found",
+                "value": {
+                  "message": "Not Found"
+                }
+              }
+            }
+          }
+        }
+      },
+      "MalformedJson": {
+        "description": "The body is not valid JSON.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "examples": {
+              "malformed": {
+                "summary": "Malformed JSON body.",
+                "value": {
+                  "message": "Malformed JSON body."
+                }
+              }
+            }
+          }
+        }
+      },
+      "CsrfMismatch": {
+        "description": "Cross-origin request: `Origin` / `Sec-Fetch-Site` does not match the app.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "examples": {
+              "csrf": {
+                "summary": "CSRF token mismatch.",
+                "value": {
+                  "message": "CSRF token mismatch."
+                }
+              }
+            }
+          }
+        }
+      },
+      "InsufficientStorage": {
+        "description": "Not enough free disk space (the server keeps 512 MB free).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "examples": {
+              "storage": {
+                "summary": "Insufficient storage space.",
+                "value": {
+                  "message": "Insufficient storage space."
+                }
+              }
+            }
+          }
+        }
+      },
+      "ServerError": {
+        "description": "Unexpected error. In production the message is always \"Server Error\".",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "examples": {
+              "serverError": {
+                "summary": "Server Error",
+                "value": {
+                  "message": "Server Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

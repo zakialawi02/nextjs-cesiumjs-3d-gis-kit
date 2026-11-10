@@ -1,0 +1,37 @@
+x-converter-security: &converter-security
+  user: "${GEODATA_CONVERTER_USER:-1000:1000}"
+  network_mode: none
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  mem_limit: "${GEODATA_CONVERTER_MEMORY:-4g}"
+  cpus: "${GEODATA_CONVERTER_CPUS:-2}"
+  pids_limit: 128
+  tmpfs:
+    - /tmp:size=256m,mode=1777
+
+services:
+  # GDAL — for GeoTIFF reprojection to EPSG:4326
+  gdal:
+    <<: *converter-security
+    image: ghcr.io/osgeo/gdal:ubuntu-full-latest
+    volumes:
+      - ./storage/app/geodata:/data/geodata
+      - ./storage/app/public/terrain-tiles:/data/terrain-tiles
+      - ./storage/app/public/xyz-tiles:/data/xyz-tiles
+    working_dir: /data
+    entrypoint: [""] 
+    command: ["gdalinfo", "--version"] # Default command so 'up' doesn't fail
+    restart: "no"
+
+  # CTB — Cesium Terrain Builder (quantized-mesh)
+  ctb:
+    <<: *converter-security
+    image: tumgis/ctb-quantized-mesh:latest
+    volumes:
+      - ./storage/app/geodata:/data/geodata
+      - ./storage/app/public/terrain-tiles:/data/terrain-tiles
+      - ./storage/app/public/xyz-tiles:/data/xyz-tiles
+    working_dir: /data
+    command: ["ctb-tile", "--version"] # Default command so 'up' doesn't fail
+    restart: "no"
