@@ -43,7 +43,8 @@ export async function resetPasswordAction(formData: FormData): Promise<ActionRes
 
   const { token, email, password } = parsed.data;
   const status = await resetPassword(email.toLowerCase(), token, password);
-  if (status !== "reset") return invalid({ email: [PASSWORD_STATUS[status]] });
+  // An unknown email is reported as an invalid token, so the form does not reveal accounts.
+  if (status !== "reset") return invalid({ email: [PASSWORD_STATUS[status === "user" ? "token" : status]] });
 
   await setFlash("success", PASSWORD_STATUS.reset);
   redirect("/login");

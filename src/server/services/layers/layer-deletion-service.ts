@@ -2,6 +2,7 @@ import type { ConversionJob, SourceFile } from "@prisma/client";
 
 import { JobStatus, LayerType } from "@/lib/enums";
 import { prisma } from "@/lib/prisma";
+import { forgetPublishedLayer } from "@/server/geodata/published-layer";
 import { runCleanupLayerFiles } from "@/server/jobs/cleanup-layer-files-job";
 import type { CleanupLayerFilesPayload } from "@/server/jobs/types";
 import { log } from "@/server/logger";
@@ -103,6 +104,8 @@ export async function deleteLayer(layerId: string): Promise<DeleteLayerResult> {
       await tx.sourceFile.delete({ where: { id: file.id } });
     }
   });
+  // Tiles stay on disk until the cleanup job runs: stop serving them right away.
+  forgetPublishedLayer(layer.id);
 
   return {
     status: "deleted",

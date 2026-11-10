@@ -127,6 +127,7 @@ Everything below lives in `.env` (see `.env.example`). Variables are validated b
 | `AUTH_SECRET` | (required in production) | Signs and encrypts session tokens. `npm run generate:auth` or `openssl rand -base64 32`. Changing it signs everyone out. `NEXTAUTH_SECRET` is accepted as a fallback. |
 | `NEXTAUTH_URL` | unset | Canonical URL for NextAuth callbacks. Set it to the same value as `APP_URL`; with `https://` the session cookie gets the `__Secure-` prefix. |
 | `SESSION_LIFETIME` | `120` | Idle minutes before a session without "Remember me" expires ("Remember me" lasts 30 days). |
+| `TRUSTED_PROXY_COUNT` | `1` | Reverse proxies in front of the app that append to `X-Forwarded-For`; the client IP for rate limits is taken that many hops from the right. `0` trusts no header. |
 | `AUTH_OAUTH_ALLOW_SIGNUP` | `false` | `true` creates an `engineering` account for an OAuth email that has no account; otherwise such sign-ins are refused. |
 | `AUTH_DISCORD_ID` / `AUTH_DISCORD_SECRET` | empty | Enables Discord sign-in when both are set. |
 | `AUTH_GITHUB_ID` / `AUTH_GITHUB_SECRET` | empty | Enables GitHub sign-in when both are set. |
@@ -265,7 +266,7 @@ npx prisma migrate dev --name add_something   # same as npm run db:generate
 
 **Add an OAuth provider.** Add the `AUTH_<PROVIDER>_ID` / `AUTH_<PROVIDER>_SECRET` variables to `src/env.ts` and `.env.example`, push the NextAuth provider into `oauthProviders` in `src/lib/auth.ts` behind the same "both set" check, and optionally add an icon to `PROVIDER_ICONS` in `src/app/(guest)/login/login-form.tsx` (the login page lists every configured provider automatically). Register the callback URL `<NEXTAUTH_URL>/api/auth/callback/<provider id>` with the provider, for example `http://localhost:3000/api/auth/callback/github`. Only use providers that return verified email addresses: accounts are linked by email.
 
-**Add a new vector input format.** Accept the extension in `src/config/geodata.ts` (`allowedExtensions`), in `upload-completion-service.ts` (`VECTOR_EXTENSIONS`) and in the vector file picker (`accept` in `src/lib/map/upload/upload-modal.js`), add a content check to `headerMatchesFormat()` in `upload-file-validator.ts`, add a branch in `ProcessVectorLayer.convertToWgs84GeoJson()` that produces WGS84 GeoJSON (preferably through `GdalService` inside the `gdal` container), and add the type to `SourceFileType` in `src/lib/enums.ts`.
+**Add a new vector input format.** Accept the extension in `src/config/geodata.ts` (`allowedExtensions`), in `upload-completion-service.ts` (`VECTOR_EXTENSIONS`) and in the vector file picker (`accept` in `src/components/map/upload-modal.tsx`), add a content check to `headerMatchesFormat()` in `upload-file-validator.ts`, add a branch in `ProcessVectorLayer.convertToWgs84GeoJson()` that produces WGS84 GeoJSON (preferably through `GdalService`, which runs `ogr2ogr` in the volume-less `gdal-vector` container; add the extension's OGR driver to `inputDriverFor()`), and add the type to `SourceFileType` in `src/lib/enums.ts`.
 
 **Change the terrain pipeline.** Edit `terrain-conversion-service.ts`. Every external tool call goes through `runDockerCompose()`, so new tools must exist in the `gdal` or `ctb` images, and paths must be under the mounted `/data/geodata`, `/data/terrain-tiles` or `/data/xyz-tiles`.
 

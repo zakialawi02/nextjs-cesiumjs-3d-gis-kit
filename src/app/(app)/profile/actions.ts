@@ -36,7 +36,13 @@ export async function updateProfileAction(formData: FormData): Promise<ActionRes
   if (!parsed.success || Object.keys(errors).length > 0) return invalid(errors);
 
   try {
-    await prisma.user.update({ where: { id: user.id }, data: parsed.data });
+    // A self-chosen new address is unverified (Laravel's MustVerifyEmail behaviour): OAuth sign-ins
+    // never link to it (src/lib/auth.ts), so nobody can claim another person's address this way.
+    const emailChanged = parsed.data.email !== user.email;
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { ...parsed.data, ...(emailChanged ? { email_verified_at: null } : {}) },
+    });
   } catch (error) {
     const unique = uniqueViolationErrors(error);
     if (unique) return invalid(unique);

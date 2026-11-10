@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { ZodError, type ZodTypeAny, type z } from "zod";
 
 import { env } from "@/env";
+import { clientIpFrom } from "@/server/client-ip";
 import { StoragePathError } from "@/server/storage";
 
 /**
@@ -97,9 +98,7 @@ export async function readBody(request: Request): Promise<Record<string, unknown
 }
 
 export function clientIp(request: Request): string {
-  const forwarded = request.headers.get("x-forwarded-for");
-  if (forwarded) return forwarded.split(",")[0].trim();
-  return request.headers.get("x-real-ip") ?? "unknown";
+  return clientIpFrom((name) => request.headers.get(name));
 }
 
 /**

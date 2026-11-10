@@ -22,6 +22,11 @@ describe("internalRedirectPath", () => {
     ["same host, other port", "http://localhost:4000/dashboard"],
     ["same host, other scheme", "https://localhost:3000/dashboard"],
     ["not a string", ["/dashboard"]],
+    // Paths that only become protocol-relative after URL normalisation (security review fix).
+    ["dot segment before double slash", "/.//evil.example"],
+    ["parent segment before double slash", "/a/..//evil.example"],
+    ["encoded dot segment", "/%2e//evil.example"],
+    ["same origin with double slash path", "http://localhost:3000//evil.example"],
   ])("rejects %s", (_label, target) => {
     expect(internalRedirectPath(target, ORIGINS)).toBeNull();
   });

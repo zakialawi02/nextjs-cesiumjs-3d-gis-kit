@@ -7,6 +7,7 @@ import { JOB_STATUS_LABELS, JobStatus, LayerStatus, LayerType } from "@/lib/enum
 import { formatBytes, formatDate } from "@/lib/format";
 import { prisma } from "@/lib/prisma";
 import { requireAdmin } from "@/server/auth";
+import { forgetPublishedLayer } from "@/server/geodata/published-layer";
 import { formatDateTimeShort, formatTime, numberFormat, statusLabel, strLimit, ucfirst } from "@/server/dashboard/format";
 import {
   formValues,
@@ -202,6 +203,7 @@ export async function archiveLayerAction(id: string): Promise<ActionResult> {
     data: { status: LayerStatus.Archived },
   });
   if (updated.count === 0) return { ok: false, message: "Only published layers can be archived." };
+  forgetPublishedLayer(layer.id); // stop serving its tiles now, not after the cache TTL
 
   revalidatePath(LAYERS_PATH);
   return { ok: true, message: `Layer "${layer.name}" archived. It is hidden from the map.` };
@@ -229,6 +231,7 @@ export async function restoreLayerAction(id: string): Promise<ActionResult> {
     data: { status: LayerStatus.Published },
   });
   if (updated.count === 0) return { ok: false, message: "Only archived layers can be restored." };
+  forgetPublishedLayer(layer.id);
 
   revalidatePath(LAYERS_PATH);
   return { ok: true, message: `Layer "${layer.name}" restored to the map.` };

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import bcrypt from "bcryptjs";
-import type { NextAuthOptions, User as NextAuthUser } from "next-auth";
+import type { NextAuthOptions, Profile, User as NextAuthUser } from "next-auth";
 import { encode as encodeJwt } from "next-auth/jwt";
 import CredentialsProvider from "next-auth/providers/credentials";
 import DiscordProvider from "next-auth/providers/discord";
@@ -11,6 +11,7 @@ import GoogleProvider from "next-auth/providers/google";
 import { env } from "@/env";
 import { UserRole } from "@/lib/enums";
 import { prisma } from "@/lib/prisma";
+import { clientIpFromRecord } from "@/server/client-ip";
 import { rateLimiter, RATE_LIMITS } from "@/server/rate-limit";
 
 /**
@@ -45,7 +46,28 @@ if (env.AUTH_DISCORD_ID && env.AUTH_DISCORD_SECRET) {
   oauthProviders.push(DiscordProvider({ clientId: env.AUTH_DISCORD_ID, clientSecret: env.AUTH_DISCORD_SECRET }));
 }
 if (env.AUTH_GITHUB_ID && env.AUTH_GITHUB_SECRET) {
-  oauthProviders.push(GitHubProvider({ clientId: env.AUTH_GITHUB_ID, clientSecret: env.AUTH_GITHUB_SECRET }));
+  oauthProviders.push(
+    GitHubProvider({
+      clientId: env.AUTH_GITHUB_ID,
+      clientSecret: env.AUTH_GITHUB_SECRET,
+      // next-auth's default takes the primary address from /user/emails without checking that
+      // GitHub verified it. Use only the primary *verified* address and record that it is verified.
+      userinfo: {
+        url: "https://api.github.com/user",
+        async request({ client, tokens }) {
+          const profile = (await client.userinfo(tokens.access_token!)) as Record<string, unknown>;
+          const response = await fetch("https://api.github.com/user/emails", {
+            headers: { Authorization: `token ${tokens.access_token}`, Accept: "application/vnd.github+json" },
+          });
+          const emails = response.ok
+            ? ((await response.json()) as Array<{ email: string; primary: boolean; verified: boolean }>)
+            : [];
+          const verified = emails.find((entry) => entry.primary && entry.verified);
+          return { ...profile, email: verified?.email, email_verified: Boolean(verified) } as Profile;
+        },
+      },
+    }),
+  );
 }
 if (env.AUTH_GOOGLE_ID && env.AUTH_GOOGLE_SECRET) {
   oauthProviders.push(GoogleProvider({ clientId: env.AUTH_GOOGLE_ID, clientSecret: env.AUTH_GOOGLE_SECRET }));
@@ -56,6 +78,23 @@ export const configuredOAuthProviders = oauthProviders.map((provider) => ({
   id: provider.id,
   name: provider.name,
 }));
+
+/**
+ * Whether the OAuth provider positively reports the profile email as verified. Unknown providers
+ * and missing flags count as unverified.
+ */
+export function isProviderEmailVerified(provider: string, profile: unknown): boolean {
+  const claims = (profile ?? {}) as { email_verified?: unknown; verified?: unknown };
+  switch (provider) {
+    case "google":
+    case "github": // set by the GitHub userinfo override above
+      return claims.email_verified === true;
+    case "discord":
+      return claims.verified === true;
+    default:
+      return false;
+  }
+}
 
 /** Short fingerprint of the stored password hash; a password change invalidates older tokens. */
 export function passwordFingerprint(passwordHash: string | null | undefined): string {
@@ -68,13 +107,12 @@ export function passwordFingerprint(passwordHash: string | null | undefined): st
 // Compared against when the identifier is unknown, so response time does not reveal accounts.
 const DUMMY_HASH = "$2b$12$ixEvgas5RnGIVqdkQGDeKukpJhWFRwjCu0pWtCRr21mX7M2UMraa.";
 
-function clientIpFromHeaders(headers: Record<string, unknown> | undefined): string {
-  const forwarded = headers?.["x-forwarded-for"];
-  const value = Array.isArray(forwarded) ? forwarded[0] : forwarded;
-  if (typeof value === "string" && value.trim() !== "") return value.split(",")[0].trim();
-  const realIp = headers?.["x-real-ip"];
-  return typeof realIp === "string" && realIp !== "" ? realIp : "unknown";
-}
+/**
+ * Failed attempts per account, regardless of IP: caps password guessing against one account even
+ * when the client IP cannot be trusted (no reverse proxy) or the attacker rotates addresses.
+ */
+const ACCOUNT_MAX_FAILURES = 20;
+const ACCOUNT_WINDOW_SECONDS = 15 * 60;
 
 const credentialsProvider = CredentialsProvider({
   id: "credentials",
@@ -93,9 +131,14 @@ const credentialsProvider = CredentialsProvider({
       throw new Error(AUTH_MESSAGES.failed);
     }
 
-    const ip = clientIpFromHeaders(req?.headers as Record<string, unknown> | undefined);
+    const ip = clientIpFromRecord(req?.headers as Record<string, unknown> | undefined);
     const ipKey = `login:${ip}`;
     const throttleKey = `login-identifier:${identifier}|${ip}`;
+    const accountKey = `login-account:${identifier}`;
+
+    if (rateLimiter.tooManyAttempts(accountKey, ACCOUNT_MAX_FAILURES)) {
+      throw new Error(AUTH_MESSAGES.throttle(rateLimiter.availableIn(accountKey)));
+    }
 
     if (rateLimiter.tooManyAttempts(ipKey, RATE_LIMITS.login)) {
       throw new Error(AUTH_MESSAGES.throttle(rateLimiter.availableIn(ipKey)));
@@ -114,10 +157,12 @@ const credentialsProvider = CredentialsProvider({
     const valid = await bcrypt.compare(password, user?.password ?? DUMMY_HASH);
     if (!user || !user.password || !valid) {
       rateLimiter.hit(throttleKey, 60);
+      rateLimiter.hit(accountKey, ACCOUNT_WINDOW_SECONDS);
       throw new Error(AUTH_MESSAGES.failed);
     }
 
     rateLimiter.clear(throttleKey);
+    rateLimiter.clear(accountKey);
 
     return {
       id: user.id,
@@ -171,7 +216,10 @@ async function resolveOAuthUser(
 
   let user = await prisma.user.findUnique({ where: { email: normalizedEmail } });
 
-  if (user?.deleted_at) return { error: "oauth_no_account" };
+  // Link only to accounts whose own email address is verified (admin-created accounts, or a user
+  // who has not changed their email since): otherwise anyone could pre-register an address they
+  // don't own and receive the real owner's OAuth sign-in.
+  if (user?.deleted_at || (user && !user.email_verified_at)) return { error: "oauth_no_account" };
 
   if (!user) {
     if (!env.AUTH_OAUTH_ALLOW_SIGNUP) return { error: "oauth_no_account" };
@@ -214,11 +262,9 @@ export const authOptions: NextAuthOptions = {
     async signIn({ user, account, profile }) {
       if (!account || account.provider === "credentials") return true;
 
-      // GitHub returns `email: null` for private addresses unless the user:email scope applies;
-      // next-auth then fetches the primary verified email into `user.email`.
-      const verified =
-        account.provider !== "google" ||
-        (profile as { email_verified?: boolean } | undefined)?.email_verified !== false;
+      // An OAuth email is only trusted when the provider positively says it verified it; anyone can
+      // sign up at a provider with someone else's (unverified) address.
+      const verified = isProviderEmailVerified(account.provider, profile);
       const result = await resolveOAuthUser(
         account.provider,
         account.providerAccountId,

@@ -44,6 +44,24 @@ export function diskPath(disk: DiskName, relativePath = ""): string {
   return resolved;
 }
 
+/**
+ * diskPath() plus a symlink check, for reads that are served to users: the real (symlink-resolved)
+ * path must still be inside the disk root. Converter containers write into storage/app/geodata and
+ * the tile folders; without this a planted symlink (e.g. 0/0/0.terrain -> /etc/...) would make the
+ * tile routes serve host files.
+ */
+export async function realDiskPath(disk: DiskName, relativePath: string): Promise<string> {
+  const target = diskPath(disk, relativePath);
+  const [realRoot, realTarget] = await Promise.all([
+    fs.realpath(/*turbopackIgnore: true*/ DISK_ROOTS[disk]),
+    fs.realpath(/*turbopackIgnore: true*/ target),
+  ]);
+  if (realTarget !== realRoot && !realTarget.startsWith(realRoot + path.sep)) {
+    throw new StoragePathError(`Path resolves outside the ${disk} disk: ${relativePath}`);
+  }
+  return realTarget;
+}
+
 /** Storage-relative path with forward slashes (what gets stored in the database). */
 export function toPosix(relativePath: string): string {
   return relativePath.split(path.sep).join("/");
@@ -64,15 +82,15 @@ export const storage = {
   },
 
   async read(disk: DiskName, relativePath: string): Promise<Buffer> {
-    return fs.readFile(diskPath(disk, relativePath));
+    return fs.readFile(await realDiskPath(disk, relativePath));
   },
 
   async readText(disk: DiskName, relativePath: string): Promise<string> {
-    return fs.readFile(diskPath(disk, relativePath), "utf8");
+    return fs.readFile(await realDiskPath(disk, relativePath), "utf8");
   },
 
-  readStream(disk: DiskName, relativePath: string) {
-    return createReadStream(diskPath(disk, relativePath));
+  async readStream(disk: DiskName, relativePath: string) {
+    return createReadStream(await realDiskPath(disk, relativePath));
   },
 
   async write(disk: DiskName, relativePath: string, contents: string | Uint8Array): Promise<void> {

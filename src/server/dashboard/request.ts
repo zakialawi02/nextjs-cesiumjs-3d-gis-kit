@@ -1,13 +1,12 @@
 import { headers } from "next/headers";
 
 import { env } from "@/env";
+import { clientIpFrom } from "@/server/client-ip";
 
-/** Client IP for rate limiting in Server Actions (first X-Forwarded-For hop, then X-Real-IP). */
+/** Client IP for rate limiting in Server Actions (trusted proxy hop; see src/server/client-ip.ts). */
 export async function requestIp(): Promise<string> {
   const store = await headers();
-  const forwarded = store.get("x-forwarded-for");
-  if (forwarded) return forwarded.split(",")[0].trim() || "unknown";
-  return store.get("x-real-ip") ?? "unknown";
+  return clientIpFrom((name) => store.get(name));
 }
 
 /**
