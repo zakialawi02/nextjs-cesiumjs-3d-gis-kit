@@ -5,6 +5,7 @@ import {
   CircleQuestionMark,
   Hand,
   Mouse,
+  MountainSnow,
   Orbit,
   Pipette,
   Ruler,
@@ -69,6 +70,11 @@ const TOOLS: Array<{ icon: LucideIcon; title: string; label: string }> = [
     icon: Orbit,
     title: "Pivot camera",
     label: "Orbits the camera around a point you pick.",
+  },
+  {
+    icon: MountainSnow,
+    title: "Depth test against terrain",
+    label: "Hides vector features behind hills or below the terrain surface. Switch it in the account menu.",
   },
 ];
 

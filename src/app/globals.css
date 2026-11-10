@@ -733,11 +733,13 @@
     transition: translate 180ms var(--map-ease);
   }
 
-  .dark .map-switch-mini {
+  .dark [data-theme-toggle] > .map-switch-mini,
+  .map-menu-item[aria-pressed="true"] > .map-switch-mini {
     background-color: var(--map-accent);
   }
 
-  .dark .map-switch-mini::before {
+  .dark [data-theme-toggle] > .map-switch-mini::before,
+  .map-menu-item[aria-pressed="true"] > .map-switch-mini::before {
     translate: 0.875rem 0;
   }
 

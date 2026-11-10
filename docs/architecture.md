@@ -592,7 +592,7 @@ sequenceDiagram
 | `src/lib/map/globals.js` | proj4 with the configured UTM zone, `longLatToUtm`, `cartesianToCoords`, `openModal` / `closeModal`, `UTM_*` and `WGS84_EPSG` on `window`. |
 | `src/lib/map/ui-interactions.js` | Vanilla modals (`data-modal`), accordions, tabs, dismissible messages and the off-canvas sidebar. Every initializer returns a cleanup function. |
 | `src/lib/map/map-page.js` | Page script: side panels and shortcuts (`L` layers, `D` data, `Esc`), account menu, layer list, recent uploads, upload submission with progress cards, coordinate copy. Installs `window.cleanupMapPage()`. |
-| `src/lib/map/cesium-map.js` | `CesiumMapController`: viewer setup, navigation (compass, zoom, pivot camera, geolocation, coordinate picker), terrain / ortho / vector layers, measurement and Vol/Profile analysis; `initMapPage()` wires the controls. |
+| `src/lib/map/cesium-map.js` | `CesiumMapController`: viewer setup, navigation (compass, zoom, pivot camera, geolocation, coordinate picker, depth test against terrain), terrain / ortho / vector layers, measurement and Vol/Profile analysis; `initMapPage()` wires the controls. |
 | `src/lib/map/cesium-drawer.js` | `CesiumMapDrawer`: interactive point / line / polygon / circle drawing with undo and vertex snapping. |
 | `src/lib/map/cesium-measure.js` | Distance, surface distance, area, surface area and circle measures built on the drawer. |
 | `src/lib/map/upload/*` | Chunked, resumable upload client, upload modal wiring, job-status polling (every 4 s with back-off) and the pause / resume / cancel buttons. |

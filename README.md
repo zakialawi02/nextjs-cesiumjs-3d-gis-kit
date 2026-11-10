@@ -15,6 +15,7 @@ This is the Next.js port of [Laravel CesiumJS 3D GIS Kit](https://github.com/zak
 **3D map**
 - Layer panel grouped by category, terrain + orthophoto overlay, vector rendering with labels.
 - Navigation: compass/north reset, zoom, pivot camera, geolocation, coordinate picker, live WGS84 cursor coordinates.
+- Depth test against terrain toggle to hide vector features behind hills or below the surface (remembered per browser).
 - Measure toolbar: planar and surface distance, planar and surface area, circle radius/area.
 - Vol/Profile analysis: cut & fill volume (flat, boundary or comparison terrain) and elevation profiles with an optional comparison terrain.
 - Help popover with mouse, touch and keyboard hints.
