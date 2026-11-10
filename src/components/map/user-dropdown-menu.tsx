@@ -2,7 +2,7 @@
 
 /* eslint-disable @next/next/no-img-element -- profile photos are small, already-sized avatars */
 
-import { LayoutDashboard, LogOut, Moon, Sun, UserCog } from "lucide-react";
+import { LayoutDashboard, LogOut, Moon, MountainSnow, Sun, UserCog } from "lucide-react";
 import Link from "next/link";
 import { signOut } from "next-auth/react";
 import { useEffect, useRef, useSyncExternalStore } from "react";
@@ -133,6 +133,15 @@ export function UserDropdownMenu({
             <Moon size="1em" className="dark:hidden" aria-hidden="true" />
             <Sun size="1em" className="hidden dark:block" aria-hidden="true" />
             <span className="flex-1">Dark mode</span>
+            <span className="map-switch-mini" aria-hidden="true"></span>
+          </button>
+          {/* Driven by src/lib/map/cesium-map.js (toggleDepthTestAgainstTerrain), which sets aria-pressed. */}
+          <button type="button" id="depthTestToggle" className="map-menu-item" aria-pressed="false">
+            <MountainSnow size="1em" aria-hidden="true" />
+            <span className="flex min-w-0 flex-1 flex-col py-1.5">
+              <span>Terrain depth test</span>
+              <span className="text-[0.6875rem] font-normal text-map-subtle">Hide vectors behind terrain</span>
+            </span>
             <span className="map-switch-mini" aria-hidden="true"></span>
           </button>
         </nav>

@@ -269,6 +269,7 @@ class CesiumMapController {
         this.viewer.scene.globe.enableLighting = true;
         this.viewer.scene.globe.showAtmosphere = false;
         this.viewer.scene.globe.depthTestAgainstTerrain = storedDepthTest;
+        this._syncDepthTestToggle();
         this.viewer.scene.debugShowFramesPerSecond = storedFPS;
         this.performanceController = new MapPerformanceController(this.viewer, {
             quality: storedQuality,
@@ -966,6 +967,29 @@ class CesiumMapController {
             this._disablePivotMode();
             this._startGeolocation();
         }
+    }
+
+    /**
+     * Toggle depth testing against terrain, so vector features behind hills or below
+     * the surface are hidden. The choice is remembered in localStorage.
+     */
+    toggleDepthTestAgainstTerrain() {
+        const isEnabled = !this.viewer.scene.globe.depthTestAgainstTerrain;
+
+        this.viewer.scene.globe.depthTestAgainstTerrain = isEnabled;
+        localStorage.setItem("map_settings_depth_test", String(isEnabled));
+        this._syncDepthTestToggle();
+
+        this.viewer.scene.requestRender();
+    }
+
+    /**
+     * Reflect the current depth test state on the switch in the account menu.
+     */
+    _syncDepthTestToggle() {
+        document
+            .getElementById("depthTestToggle")
+            ?.setAttribute("aria-pressed", String(this.viewer.scene.globe.depthTestAgainstTerrain));
     }
 
     /**
@@ -4947,6 +4971,9 @@ export function initMapPage() {
     });
     addManagedListener(document.getElementById("geolocationBtn"), "click", () => {
         mapController.toggleGeolocation();
+    });
+    addManagedListener(document.getElementById("depthTestToggle"), "click", () => {
+        mapController.toggleDepthTestAgainstTerrain();
     });
     addManagedListener(document.getElementById("trackingBtn"), "click", () => {
         mapController.toggleDeviceCompass();
