@@ -110,9 +110,10 @@ describe("OpenAPI document", () => {
     expect(refs.filter((ref) => !ref.startsWith("#/") || resolveRef(ref) === undefined)).toEqual([]);
   });
 
-  it("documents every geodata, health and docs route, with the exported methods", () => {
+  it("documents every geodata, mobile, health and docs route, with the exported methods", () => {
     const documented = routes.filter(
-      ({ segments }) => ["geodata", "up"].includes(segments[0]) || (segments[0] === "api" && segments[1] === "api-docs"),
+      ({ segments }) =>
+        ["geodata", "up"].includes(segments[0]) || (segments[0] === "api" && ["api-docs", "mobile"].includes(segments[1])),
     );
     expect(documented.length).toBeGreaterThan(10);
     for (const route of documented) {

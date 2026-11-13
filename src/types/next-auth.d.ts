@@ -29,5 +29,7 @@ declare module "next-auth/jwt" {
     invalid?: boolean;
     username?: string;
     role?: string;
+    /** Set on Bearer tokens from POST /api/mobile/token (src/server/mobile-token.ts). */
+    mobile?: boolean;
   }
 }

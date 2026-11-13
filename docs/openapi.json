@@ -3,7 +3,7 @@
   "info": {
     "title": "3D WebGIS Core API",
     "version": "1.0.0",
-    "description": "HTTP API of **3D WebGIS Core**: published layer lists, terrain / orthophoto tiles, vector GeoJSON and the chunked geodata upload used by the 3D map. Request and response bodies are JSON unless an operation says otherwise.\n\nThe dashboard's management actions (layer renaming / archiving, layer categories, users, profile) are Next.js Server Actions, not REST endpoints, and are not part of this document.\n\n## Authentication\n\nEvery `/geodata/*` endpoint needs a signed-in user. Sessions are NextAuth v4 JWTs kept in an HTTP-only cookie: `next-auth.session-token` (`__Secure-next-auth.session-token` over HTTPS). On this page your browser sends that cookie by itself, so **Try it out** runs as you.\n\nAPI clients sign in with the credentials flow and keep a cookie jar:\n\n1. `GET /api/auth/csrf` → `{ \"csrfToken\": \"...\" }` plus a `next-auth.csrf-token` cookie.\n2. `POST /api/auth/callback/credentials` as `application/x-www-form-urlencoded` with `csrfToken`, `id_user` (username or email), `password`, `remember=true|false` and `json=true`. Success is `200 { \"url\": ... }` with the session cookie; wrong credentials are `401`.\n3. Send the cookie with every request. `GET /api/auth/session` shows the signed-in user; `POST /api/auth/signout` (with a fresh `csrfToken`) clears the cookie.\n\n```bash\ncurl -c jar -b jar http://localhost:3000/api/auth/csrf\ncurl -c jar -b jar http://localhost:3000/api/auth/callback/credentials \\\n  --data-urlencode csrfToken=<token> --data-urlencode id_user=<username> \\\n  --data-urlencode password=<password> -d remember=false -d json=true\ncurl -b jar http://localhost:3000/geodata/layers/all\n```\n\nWithout \"Remember me\" a session ends after 120 idle minutes; with it, after 30 days. Deleting a user or changing their password revokes their sessions. Sign-in is throttled (20 attempts per minute per IP, 5 failed attempts per identifier and IP). OAuth sign-in (Discord, GitHub, Google, when configured) is a browser redirect flow and cannot be used by API clients.\n\n## Roles\n\n| Role | Access |\n| --- | --- |\n| `admin` | Everything: layer lists, tiles, vector data, uploads, recent uploads, layer deletion. |\n| `engineering` | Read-only: layer lists, categories, icons, tiles and vector data. |\n\nA request without a valid session gets `401 {\"message\":\"Unauthenticated.\"}`; a role without access gets `403 {\"message\":\"This action is unauthorized.\"}`.\n\n## CSRF protection\n\n`POST` and `DELETE` requests to `/geodata/*` must come from the app's own origin: when the request has an `Origin` header it must equal the app origin (or `APP_URL`), otherwise `Sec-Fetch-Site` must be `same-origin` or `none`. Anything else gets `419 {\"message\":\"CSRF token mismatch.\"}`. Non-browser clients that send neither header pass. The NextAuth endpoints use their own `csrfToken` instead (see Authentication).\n\n## Errors\n\nErrors of `/geodata/*` are JSON: `{ \"message\": \"...\" }`, and for validation failures (422) `{ \"message\": \"<first error>\", \"errors\": { \"<field>\": [\"...\"] } }`.\n\n| Status | Meaning |\n| --- | --- |\n| 400 | Malformed JSON body |\n| 401 / 403 | Not signed in / role not allowed |\n| 404 | Not found, not published, or not yours (upload sessions and jobs) |\n| 409 | Conflicting state (upload incomplete or already submitted, layer still processing) |\n| 410 | Upload session expired |\n| 413 | Upload quota exceeded (2000 MB in flight per user) |\n| 419 | CSRF check failed |\n| 422 | Validation failed |\n| 429 | Rate limit (`Retry-After` header) or too many active uploads |\n| 500 | Unexpected error (the message is generic in production) |\n| 503 | Upload could not be queued |\n| 507 | Not enough free disk space |\n\nTile endpoints answer a missing tile with a plain-text (or empty) 404 instead of JSON.\n\n## Upload flow\n\nUploads are admin-only and limited per user per minute: `upload-start` 20 (start, cancel, assemble), `upload-chunks` 240, `upload-status` 120 (session and job status).\n\n1. **Start a session**: `POST /geodata/upload/sessions` with `{ fileName, fileSize, requestId }` → `201 { session }`. Use one random UUID `requestId` per file and reuse it on retries. Allowed extensions: `.tif`, `.tiff`, `.geotiff`, `.geojson`, `.dxf`, `.dwg`, `.str`, `.zip`; at most 1000 MB per file, 4 active sessions and 2000 MB in flight per user. Unfinished sessions expire 24 hours after the last stored chunk.\n2. **Send the chunks**: split the file into `session.chunkSize` (2 MB) pieces and `POST /geodata/upload/chunk` each one as `multipart/form-data` with `file`, `identifier`, `chunkIndex` and `checksum` (lowercase hex SHA-256 of the chunk). Order does not matter and retries are safe. To resume, `GET /geodata/upload/sessions/{identifier}` and send the indexes missing from `chunks`.\n3. **Assemble**: `POST /geodata/upload/assemble-raster` (DEM GeoTIFF plus an optional orthophoto session) or `POST /geodata/upload/assemble-vector` (GeoJSON, zipped Shapefile, DXF, DWG, Surpac STR) → `202 { job_id }`. The layer is created with status `processing`.\n4. **Poll**: `GET /geodata/upload/status/{job_id}` until `status` is `done` (the response then contains the layer) or `failed`.\n\n`DELETE /geodata/upload/sessions/{identifier}` cancels an upload that has not been assembled yet. Files are verified by the background worker (format signature, Shapefile archive limits), so a bad file shows up as a `failed` job rather than an HTTP error.",
+    "description": "HTTP API of **3D WebGIS Core**: published layer lists, terrain / orthophoto tiles, vector GeoJSON and the chunked geodata upload used by the 3D map. Request and response bodies are JSON unless an operation says otherwise.\n\nThe dashboard's management actions (layer renaming / archiving, layer categories, users, profile) are Next.js Server Actions, not REST endpoints, and are not part of this document.\n\n## Authentication\n\nEvery `/geodata/*` endpoint needs a signed-in user. Sessions are NextAuth v4 JWTs kept in an HTTP-only cookie: `next-auth.session-token` (`__Secure-next-auth.session-token` over HTTPS). On this page your browser sends that cookie by itself, so **Try it out** runs as you.\n\nAPI clients sign in with the credentials flow and keep a cookie jar:\n\n1. `GET /api/auth/csrf` → `{ \"csrfToken\": \"...\" }` plus a `next-auth.csrf-token` cookie.\n2. `POST /api/auth/callback/credentials` as `application/x-www-form-urlencoded` with `csrfToken`, `id_user` (username or email), `password`, `remember=true|false` and `json=true`. Success is `200 { \"url\": ... }` with the session cookie; wrong credentials are `401`.\n3. Send the cookie with every request. `GET /api/auth/session` shows the signed-in user; `POST /api/auth/signout` (with a fresh `csrfToken`) clears the cookie.\n\n```bash\ncurl -c jar -b jar http://localhost:3000/api/auth/csrf\ncurl -c jar -b jar http://localhost:3000/api/auth/callback/credentials \\\n  --data-urlencode csrfToken=<token> --data-urlencode id_user=<username> \\\n  --data-urlencode password=<password> -d remember=false -d json=true\ncurl -b jar http://localhost:3000/geodata/layers/all\n```\n\nWithout \"Remember me\" a session ends after 120 idle minutes; with it, after 30 days. Deleting a user or changing their password revokes their sessions. Sign-in is throttled (20 attempts per minute per IP, 5 failed attempts per identifier and IP). OAuth sign-in (Discord, GitHub, Google, when configured) is a browser redirect flow and cannot be used by API clients.\n\n### Mobile apps (Bearer token)\n\nMobile apps and other clients without a cookie jar use a Bearer token instead:\n\n1. `POST /api/mobile/token` with JSON `{ \"id_user\": \"...\", \"password\": \"...\" }` → `{ token_type: \"Bearer\", access_token, expires_in, expires_at, user }`. Wrong credentials are `422`, throttling is `429` (same limits as the login form).\n2. Send `Authorization: Bearer <access_token>` with every `/geodata/*` request (tiles included). When the header is present the session cookie is ignored, and an invalid token is `401`.\n3. `GET /api/mobile/user` checks a stored token; `POST /api/mobile/token/refresh` returns a new one before the 30 days run out.\n4. Clients that cannot add a header to tile requests (Cesium for Unity) get a signed terrain URL from `GET /api/mobile/layers/{layerId}/terrain-url`: its `layer.json` carries the signed `t` into every tile URL. It works for that layer only, for 12 hours.\n\n```bash\ncurl -X POST http://localhost:3000/api/mobile/token -H \"Content-Type: application/json\" \\\n  -d '{\"id_user\":\"<username>\",\"password\":\"<password>\"}'\ncurl -H \"Authorization: Bearer <access_token>\" http://localhost:3000/geodata/layers/all\n```\n\nTokens are stateless: signing out means discarding the token on the device. Deleting the user or changing their password revokes all of their tokens.\n\n## Roles\n\n| Role | Access |\n| --- | --- |\n| `admin` | Everything: layer lists, tiles, vector data, uploads, recent uploads, layer deletion. |\n| `engineering` | Read-only: layer lists, categories, icons, tiles and vector data. |\n\nA request without a valid session gets `401 {\"message\":\"Unauthenticated.\"}`; a role without access gets `403 {\"message\":\"This action is unauthorized.\"}`.\n\n## CSRF protection\n\n`POST` and `DELETE` requests to `/geodata/*` must come from the app's own origin: when the request has an `Origin` header it must equal the app origin (or `APP_URL`), otherwise `Sec-Fetch-Site` must be `same-origin` or `none`. Anything else gets `419 {\"message\":\"CSRF token mismatch.\"}`. Non-browser clients that send neither header pass. The NextAuth endpoints use their own `csrfToken` instead (see Authentication).\n\n## Errors\n\nErrors of `/geodata/*` are JSON: `{ \"message\": \"...\" }`, and for validation failures (422) `{ \"message\": \"<first error>\", \"errors\": { \"<field>\": [\"...\"] } }`.\n\n| Status | Meaning |\n| --- | --- |\n| 400 | Malformed JSON body |\n| 401 / 403 | Not signed in / role not allowed |\n| 404 | Not found, not published, or not yours (upload sessions and jobs) |\n| 409 | Conflicting state (upload incomplete or already submitted, layer still processing) |\n| 410 | Upload session expired |\n| 413 | Upload quota exceeded (2000 MB in flight per user) |\n| 419 | CSRF check failed |\n| 422 | Validation failed |\n| 429 | Rate limit (`Retry-After` header) or too many active uploads |\n| 500 | Unexpected error (the message is generic in production) |\n| 503 | Upload could not be queued |\n| 507 | Not enough free disk space |\n\nTile endpoints answer a missing tile with a plain-text (or empty) 404 instead of JSON.\n\n## Upload flow\n\nUploads are admin-only and limited per user per minute: `upload-start` 20 (start, cancel, assemble), `upload-chunks` 240, `upload-status` 120 (session and job status).\n\n1. **Start a session**: `POST /geodata/upload/sessions` with `{ fileName, fileSize, requestId }` → `201 { session }`. Use one random UUID `requestId` per file and reuse it on retries. Allowed extensions: `.tif`, `.tiff`, `.geotiff`, `.geojson`, `.dxf`, `.dwg`, `.str`, `.zip`; at most 1000 MB per file, 4 active sessions and 2000 MB in flight per user. Unfinished sessions expire 24 hours after the last stored chunk.\n2. **Send the chunks**: split the file into `session.chunkSize` (2 MB) pieces and `POST /geodata/upload/chunk` each one as `multipart/form-data` with `file`, `identifier`, `chunkIndex` and `checksum` (lowercase hex SHA-256 of the chunk). Order does not matter and retries are safe. To resume, `GET /geodata/upload/sessions/{identifier}` and send the indexes missing from `chunks`.\n3. **Assemble**: `POST /geodata/upload/assemble-raster` (DEM GeoTIFF plus an optional orthophoto session) or `POST /geodata/upload/assemble-vector` (GeoJSON, zipped Shapefile, DXF, DWG, Surpac STR) → `202 { job_id }`. The layer is created with status `processing`.\n4. **Poll**: `GET /geodata/upload/status/{job_id}` until `status` is `done` (the response then contains the layer) or `failed`.\n\n`DELETE /geodata/upload/sessions/{identifier}` cancels an upload that has not been assembled yet. Files are verified by the background worker (format signature, Shapefile archive limits), so a bad file shows up as a `failed` job rather than an HTTP error.",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -18,12 +18,19 @@
   "security": [
     {
       "sessionCookie": []
+    },
+    {
+      "bearerToken": []
     }
   ],
   "tags": [
     {
       "name": "Auth",
       "description": "NextAuth endpoints for signing in API clients with username / email and password."
+    },
+    {
+      "name": "Mobile",
+      "description": "Bearer tokens for mobile apps and other non-browser clients."
     },
     {
       "name": "Layers",
@@ -325,6 +332,369 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/mobile/token": {
+      "post": {
+        "tags": [
+          "Mobile"
+        ],
+        "operationId": "createMobileToken",
+        "summary": "Sign in and get a Bearer token",
+        "description": "Signs in with username / email and password and returns an access token for mobile apps and other non-browser clients. Send it as `Authorization: Bearer <access_token>` to every `/geodata/*` endpoint and to `/api/api-docs/openapi.json`; no cookies or CSRF token are involved.\n\nThrottled together with the login form: 20 attempts per minute per IP and 5 failed attempts per identifier + IP. OAuth-only accounts (no password) cannot use it.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MobileTokenRequest"
+              },
+              "examples": {
+                "engineering": {
+                  "summary": "Sign in by username",
+                  "value": {
+                    "id_user": "engineering",
+                    "password": "<password>"
+                  }
+                }
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/MobileTokenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Signed in.",
+            "headers": {
+              "Cache-Control": {
+                "description": "`no-store`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileTokenResponse"
+                },
+                "examples": {
+                  "signedIn": {
+                    "summary": "Token",
+                    "value": {
+                      "token_type": "Bearer",
+                      "access_token": "<access token>",
+                      "expires_in": 2592000,
+                      "expires_at": "2026-12-13T09:30:00.000Z",
+                      "user": {
+                        "id": "d5e79ebd-e3cb-41aa-9ba3-e0f3bc3bd88d",
+                        "name": "Admin User",
+                        "email": "admin@mail.com",
+                        "image": "/assets/img/profile/admin.png",
+                        "username": "admin",
+                        "role": "admin"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/MalformedJson"
+          },
+          "419": {
+            "$ref": "#/components/responses/CsrfMismatch"
+          },
+          "422": {
+            "description": "Validation failed. `message` repeats the first error; `errors` maps each invalid field to its messages.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                },
+                "examples": {
+                  "failed": {
+                    "summary": "These credentials do not match our records.",
+                    "value": {
+                      "message": "These credentials do not match our records.",
+                      "errors": {
+                        "id_user": [
+                          "These credentials do not match our records."
+                        ]
+                      }
+                    }
+                  },
+                  "missing": {
+                    "summary": "Missing field",
+                    "value": {
+                      "message": "The password field is required.",
+                      "errors": {
+                        "password": [
+                          "The password field is required."
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many login attempts. Retry after `Retry-After` seconds.",
+            "headers": {
+              "Retry-After": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "throttled": {
+                    "summary": "Too many login attempts. Please try again in 42 seconds.",
+                    "value": {
+                      "message": "Too many login attempts. Please try again in 42 seconds."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/api/mobile/token/refresh": {
+      "post": {
+        "tags": [
+          "Mobile"
+        ],
+        "operationId": "refreshMobileToken",
+        "summary": "Renew a Bearer token",
+        "description": "Returns a new token with a fresh 30-day expiry for a still-valid one. The old token keeps working until it expires; replace it on the device. Tokens are stateless, so signing out means discarding the token; changing the password (or deleting the user) revokes every token of the account.",
+        "security": [
+          {
+            "bearerToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "New token.",
+            "headers": {
+              "Cache-Control": {
+                "description": "`no-store`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileTokenResponse"
+                },
+                "examples": {
+                  "refreshed": {
+                    "summary": "Token",
+                    "value": {
+                      "token_type": "Bearer",
+                      "access_token": "<access token>",
+                      "expires_in": 2592000,
+                      "expires_at": "2026-12-13T09:30:00.000Z",
+                      "user": {
+                        "id": "d5e79ebd-e3cb-41aa-9ba3-e0f3bc3bd88d",
+                        "name": "Admin User",
+                        "email": "admin@mail.com",
+                        "image": "/assets/img/profile/admin.png",
+                        "username": "admin",
+                        "role": "admin"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No `Authorization: Bearer` header, or the token is malformed, expired, not a mobile token, or revoked (user deleted, password changed).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "unauthenticated": {
+                    "summary": "Unauthenticated.",
+                    "value": {
+                      "message": "Unauthenticated."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "419": {
+            "$ref": "#/components/responses/CsrfMismatch"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/api/mobile/user": {
+      "get": {
+        "tags": [
+          "Mobile"
+        ],
+        "operationId": "getMobileUser",
+        "summary": "User of the Bearer token",
+        "description": "Checks a stored token (for example at app start) and returns its user. Same `user` shape as `GET /api/auth/session`.",
+        "security": [
+          {
+            "bearerToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Token is valid.",
+            "headers": {
+              "Cache-Control": {
+                "description": "`no-store`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileUserResponse"
+                },
+                "examples": {
+                  "user": {
+                    "summary": "User",
+                    "value": {
+                      "user": {
+                        "id": "d5e79ebd-e3cb-41aa-9ba3-e0f3bc3bd88d",
+                        "name": "Admin User",
+                        "email": "admin@mail.com",
+                        "image": "/assets/img/profile/admin.png",
+                        "username": "admin",
+                        "role": "admin"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No `Authorization: Bearer` header, or the token is malformed, expired, not a mobile token, or revoked (user deleted, password changed).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "unauthenticated": {
+                    "summary": "Unauthenticated.",
+                    "value": {
+                      "message": "Unauthenticated."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/api/mobile/layers/{layerId}/terrain-url": {
+      "get": {
+        "tags": [
+          "Mobile"
+        ],
+        "operationId": "getMobileTerrainUrl",
+        "summary": "Signed terrain URL",
+        "description": "A signed `layer.json` URL of a published terrain layer, for clients that cannot send an Authorization header with tile requests (Cesium for Unity's `Cesium3DTileset`). Join `layer_json_url` with the server address and load it as is: the returned `layer.json` writes the same `t` into its tile URL templates. The signature covers this layer and user only, expires after 12 hours, and is revoked when the user is deleted or changes their password.",
+        "security": [
+          {
+            "bearerToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TerrainLayerId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Signed URL.",
+            "headers": {
+              "Cache-Control": {
+                "description": "`no-store`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileTerrainUrlResponse"
+                },
+                "examples": {
+                  "signed": {
+                    "summary": "Signed layer.json URL",
+                    "value": {
+                      "layer_json_url": "/geodata/terrain/01JH8Z9X2Q4K7M3N5P6R8S9T0V/layer.json?t=<user id>.<exp>.<signature>",
+                      "expires_in": 43200,
+                      "expires_at": "2026-11-14T00:00:00.000Z"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No `Authorization: Bearer` header, or the token is malformed, expired, not a mobile token, or revoked (user deleted, password changed).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "unauthenticated": {
+                    "summary": "Unauthenticated.",
+                    "value": {
+                      "message": "Unauthenticated."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
           }
         }
       }
@@ -779,7 +1149,18 @@
         ],
         "operationId": "getTerrainLayerJson",
         "summary": "Terrain tileset metadata (layer.json)",
-        "description": "Quantized-mesh `layer.json` of a published terrain layer: the entry point of `CesiumTerrainProvider.fromUrl(tileset_url)`. Tile URL templates get a `terrain_revision` parameter appended to bust stale browser caches.\n\n**Role:** any signed-in user (`admin`, `engineering`).",
+        "description": "Quantized-mesh `layer.json` of a published terrain layer: the entry point of `CesiumTerrainProvider.fromUrl(tileset_url)`. Tile URL templates get a `terrain_revision` parameter appended to bust stale browser caches. Requested with a signed `t` (from `GET /api/mobile/layers/{layerId}/terrain-url`), the templates carry the same `t`, so tile requests need no header.\n\n**Role:** any signed-in user (`admin`, `engineering`).",
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "bearerToken": []
+          },
+          {
+            "signedTerrainUrl": []
+          }
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/TerrainLayerId"
@@ -893,6 +1274,17 @@
         "operationId": "getTerrainTile",
         "summary": "Terrain tile (quantized-mesh)",
         "description": "One quantized-mesh-1.0 tile (TMS scheme, EPSG:4326) of a published terrain layer. Tiles are stored gzip-compressed and sent decompressed (the HTTP layer may re-compress them). Zoom levels follow the layer's `available` ranges (conversion range 0–15).\n\n**Role:** any signed-in user (`admin`, `engineering`).",
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "bearerToken": []
+          },
+          {
+            "signedTerrainUrl": []
+          }
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/TerrainLayerId"
@@ -3979,6 +4371,98 @@
         "additionalProperties": {
           "$ref": "#/components/schemas/AuthProvider"
         }
+      },
+      "MobileTokenRequest": {
+        "type": "object",
+        "required": [
+          "id_user",
+          "password"
+        ],
+        "properties": {
+          "id_user": {
+            "type": "string",
+            "maxLength": 255,
+            "description": "Username or email (case-insensitive).",
+            "examples": [
+              "engineering"
+            ]
+          },
+          "password": {
+            "type": "string",
+            "format": "password",
+            "writeOnly": true
+          }
+        }
+      },
+      "MobileTokenResponse": {
+        "type": "object",
+        "required": [
+          "token_type",
+          "access_token",
+          "expires_in",
+          "expires_at",
+          "user"
+        ],
+        "properties": {
+          "token_type": {
+            "type": "string",
+            "const": "Bearer"
+          },
+          "access_token": {
+            "type": "string",
+            "description": "Opaque to clients (an encrypted NextAuth JWT). Send as `Authorization: Bearer <access_token>`."
+          },
+          "expires_in": {
+            "type": "integer",
+            "description": "Lifetime in seconds (30 days).",
+            "examples": [
+              2592000
+            ]
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "user": {
+            "$ref": "#/components/schemas/SessionUser"
+          }
+        }
+      },
+      "MobileUserResponse": {
+        "type": "object",
+        "required": [
+          "user"
+        ],
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/SessionUser"
+          }
+        }
+      },
+      "MobileTerrainUrlResponse": {
+        "type": "object",
+        "required": [
+          "layer_json_url",
+          "expires_in",
+          "expires_at"
+        ],
+        "properties": {
+          "layer_json_url": {
+            "type": "string",
+            "description": "Relative to the server: `/geodata/terrain/<layer id>/layer.json?t=<token>`. Treat `t` as opaque."
+          },
+          "expires_in": {
+            "type": "integer",
+            "description": "Lifetime in seconds (12 hours).",
+            "examples": [
+              43200
+            ]
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
       }
     },
     "securitySchemes": {
@@ -3987,6 +4471,18 @@
         "in": "cookie",
         "name": "next-auth.session-token",
         "description": "NextAuth JWT session cookie from `POST /api/auth/callback/credentials`. Named `__Secure-next-auth.session-token` when the app runs over HTTPS. Browsers send it automatically on this page."
+      },
+      "bearerToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWE",
+        "description": "Access token from `POST /api/mobile/token`, sent as `Authorization: Bearer <token>`. Takes precedence over the session cookie."
+      },
+      "signedTerrainUrl": {
+        "type": "apiKey",
+        "in": "query",
+        "name": "t",
+        "description": "Signed token from `GET /api/mobile/layers/{layerId}/terrain-url`, accepted by the terrain endpoints of that one layer for 12 hours. When present it is the only credential checked."
       }
     },
     "parameters": {

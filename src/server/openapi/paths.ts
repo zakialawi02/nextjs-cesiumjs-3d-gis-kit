@@ -220,6 +220,120 @@ export function buildPaths(settings: OpenApiSettings): Record<string, PathItemOb
     },
   };
 
+  // ------------------------------------------------------------------ Mobile (Bearer tokens)
+  const sampleMobileToken = {
+    token_type: "Bearer",
+    access_token: "<access token>",
+    expires_in: 2_592_000,
+    expires_at: "2026-12-13T09:30:00.000Z",
+    user: sampleSession.user,
+  };
+  const noStore = { "Cache-Control": { description: "`no-store`.", schema: { type: "string" } } } as const;
+  const bearerUnauthenticated = errorResponse(
+    "No `Authorization: Bearer` header, or the token is malformed, expired, not a mobile token, or revoked (user deleted, password changed).",
+    { unauthenticated: "Unauthenticated." },
+  );
+
+  const createMobileToken: OperationObject = {
+    tags: ["Mobile"],
+    operationId: "createMobileToken",
+    summary: "Sign in and get a Bearer token",
+    description:
+      "Signs in with username / email and password and returns an access token for mobile apps and other non-browser " +
+      "clients. Send it as `Authorization: Bearer <access_token>` to every `/geodata/*` endpoint and to " +
+      "`/api/api-docs/openapi.json`; no cookies or CSRF token are involved.\n\n" +
+      `Throttled together with the login form: ${limits.login} attempts per minute per IP and ` +
+      `${limits["login-identifier"]} failed attempts per identifier + IP. OAuth-only accounts (no password) cannot use it.`,
+    security: [],
+    requestBody: {
+      required: true,
+      content: {
+        ...jsonContent(schemaRef("MobileTokenRequest"), {
+          engineering: { summary: "Sign in by username", value: { id_user: "engineering", password: "<password>" } },
+        }),
+        "application/x-www-form-urlencoded": { schema: schemaRef("MobileTokenRequest") },
+      },
+    },
+    responses: {
+      "200": jsonResponse("Signed in.", schemaRef("MobileTokenResponse"), { signedIn: { summary: "Token", value: sampleMobileToken } }, noStore),
+      "400": responseRef("MalformedJson"),
+      "419": responseRef("CsrfMismatch"),
+      "422": validationResponse({
+        failed: { errors: { id_user: ["These credentials do not match our records."] } },
+        missing: { summary: "Missing field", errors: { password: ["The password field is required."] } },
+      }),
+      "429": errorResponse(
+        "Too many login attempts. Retry after `Retry-After` seconds.",
+        { throttled: "Too many login attempts. Please try again in 42 seconds." },
+        { "Retry-After": headerRef("RetryAfter") },
+      ),
+      "500": responseRef("ServerError"),
+    },
+  };
+
+  const refreshMobileToken: OperationObject = {
+    tags: ["Mobile"],
+    operationId: "refreshMobileToken",
+    summary: "Renew a Bearer token",
+    description:
+      "Returns a new token with a fresh 30-day expiry for a still-valid one. The old token keeps working until it " +
+      "expires; replace it on the device. Tokens are stateless, so signing out means discarding the token; changing " +
+      "the password (or deleting the user) revokes every token of the account.",
+    security: [{ bearerToken: [] }],
+    responses: {
+      "200": jsonResponse("New token.", schemaRef("MobileTokenResponse"), { refreshed: { summary: "Token", value: sampleMobileToken } }, noStore),
+      "401": bearerUnauthenticated,
+      "419": responseRef("CsrfMismatch"),
+      "500": responseRef("ServerError"),
+    },
+  };
+
+  const getMobileUser: OperationObject = {
+    tags: ["Mobile"],
+    operationId: "getMobileUser",
+    summary: "User of the Bearer token",
+    description: "Checks a stored token (for example at app start) and returns its user. Same `user` shape as `GET /api/auth/session`.",
+    security: [{ bearerToken: [] }],
+    responses: {
+      "200": jsonResponse("Token is valid.", schemaRef("MobileUserResponse"), { user: { summary: "User", value: { user: sampleSession.user } } }, noStore),
+      "401": bearerUnauthenticated,
+      "500": responseRef("ServerError"),
+    },
+  };
+
+  const getMobileTerrainUrl: OperationObject = {
+    tags: ["Mobile"],
+    operationId: "getMobileTerrainUrl",
+    summary: "Signed terrain URL",
+    description:
+      "A signed `layer.json` URL of a published terrain layer, for clients that cannot send an Authorization header with " +
+      "tile requests (Cesium for Unity's `Cesium3DTileset`). Join `layer_json_url` with the server address and load it as is: " +
+      "the returned `layer.json` writes the same `t` into its tile URL templates. The signature covers this layer and user " +
+      "only, expires after 12 hours, and is revoked when the user is deleted or changes their password.",
+    security: [{ bearerToken: [] }],
+    parameters: [parameterRef("TerrainLayerId")],
+    responses: {
+      "200": jsonResponse(
+        "Signed URL.",
+        schemaRef("MobileTerrainUrlResponse"),
+        {
+          signed: {
+            summary: "Signed layer.json URL",
+            value: {
+              layer_json_url: `/geodata/terrain/${SAMPLE_IDS.terrainLayer}/layer.json?t=<user id>.<exp>.<signature>`,
+              expires_in: 43_200,
+              expires_at: "2026-11-14T00:00:00.000Z",
+            },
+          },
+        },
+        noStore,
+      ),
+      "401": bearerUnauthenticated,
+      "404": responseRef("NotFound"),
+      "500": responseRef("ServerError"),
+    },
+  };
+
   // ------------------------------------------------------------------ Layers
   const listLayers: OperationObject = {
     tags: ["Layers"],
@@ -363,13 +477,19 @@ export function buildPaths(settings: OpenApiSettings): Record<string, PathItemOb
   };
 
   // ------------------------------------------------------------------ Tiles
+  /** Session cookie, Bearer token, or the signed `t` query parameter. */
+  const terrainSecurity: OperationObject["security"] = [{ sessionCookie: [] }, { bearerToken: [] }, { signedTerrainUrl: [] }];
+
   const getTerrainLayerJson: OperationObject = {
     tags: ["Tiles"],
     operationId: "getTerrainLayerJson",
     summary: "Terrain tileset metadata (layer.json)",
     description:
       "Quantized-mesh `layer.json` of a published terrain layer: the entry point of `CesiumTerrainProvider.fromUrl(tileset_url)`. " +
-      `Tile URL templates get a \`terrain_revision\` parameter appended to bust stale browser caches.\n\n${ANY_ROLE}`,
+      "Tile URL templates get a `terrain_revision` parameter appended to bust stale browser caches. Requested with a signed " +
+      "`t` (from `GET /api/mobile/layers/{layerId}/terrain-url`), the templates carry the same `t`, so tile requests need no " +
+      `header.\n\n${ANY_ROLE}`,
+    security: terrainSecurity,
     parameters: [parameterRef("TerrainLayerId")],
     responses: {
       "200": {
@@ -397,6 +517,7 @@ export function buildPaths(settings: OpenApiSettings): Record<string, PathItemOb
       "One quantized-mesh-1.0 tile (TMS scheme, EPSG:4326) of a published terrain layer. Tiles are stored gzip-compressed " +
       "and sent decompressed (the HTTP layer may re-compress them). Zoom levels follow the layer's `available` ranges " +
       `(conversion range ${settings.terrainMinZoom}–${settings.terrainMaxZoom}).\n\n${ANY_ROLE}`,
+    security: terrainSecurity,
     parameters: [
       parameterRef("TerrainLayerId"),
       parameterRef("TileZ"),
@@ -814,6 +935,11 @@ export function buildPaths(settings: OpenApiSettings): Record<string, PathItemOb
     "/api/auth/session": { get: getSession },
     "/api/auth/providers": { get: getProviders },
     "/api/auth/signout": { post: signOut },
+
+    "/api/mobile/token": { post: createMobileToken },
+    "/api/mobile/token/refresh": { post: refreshMobileToken },
+    "/api/mobile/user": { get: getMobileUser },
+    "/api/mobile/layers/{layerId}/terrain-url": { get: getMobileTerrainUrl },
 
     "/geodata/layers/all": { get: listLayers },
     "/geodata/layers/terrain": { get: listTerrainLayers },

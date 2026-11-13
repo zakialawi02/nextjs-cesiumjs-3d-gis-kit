@@ -11,6 +11,7 @@ export const API_VERSION = "1.0.0";
 
 const TAGS: TagObject[] = [
   { name: "Auth", description: "NextAuth endpoints for signing in API clients with username / email and password." },
+  { name: "Mobile", description: "Bearer tokens for mobile apps and other non-browser clients." },
   { name: "Layers", description: "Published layer lists, layer categories and their icons, layer deletion." },
   { name: "Tiles", description: "Terrain (quantized-mesh) and orthophoto (XYZ PNG) tiles of published layers, as loaded by CesiumJS." },
   { name: "Vector", description: "Vector layers as GeoJSON." },
@@ -46,6 +47,23 @@ curl -b jar http://localhost:3000/geodata/layers/all
 \`\`\`
 
 Without "Remember me" a session ends after ${settings.sessionLifetimeMinutes} idle minutes; with it, after 30 days. Deleting a user or changing their password revokes their sessions. Sign-in is throttled (${limits.login} attempts per minute per IP, ${limits["login-identifier"]} failed attempts per identifier and IP). OAuth sign-in (Discord, GitHub, Google, when configured) is a browser redirect flow and cannot be used by API clients.
+
+### Mobile apps (Bearer token)
+
+Mobile apps and other clients without a cookie jar use a Bearer token instead:
+
+1. \`POST /api/mobile/token\` with JSON \`{ "id_user": "...", "password": "..." }\` → \`{ token_type: "Bearer", access_token, expires_in, expires_at, user }\`. Wrong credentials are \`422\`, throttling is \`429\` (same limits as the login form).
+2. Send \`Authorization: Bearer <access_token>\` with every \`/geodata/*\` request (tiles included). When the header is present the session cookie is ignored, and an invalid token is \`401\`.
+3. \`GET /api/mobile/user\` checks a stored token; \`POST /api/mobile/token/refresh\` returns a new one before the 30 days run out.
+4. Clients that cannot add a header to tile requests (Cesium for Unity) get a signed terrain URL from \`GET /api/mobile/layers/{layerId}/terrain-url\`: its \`layer.json\` carries the signed \`t\` into every tile URL. It works for that layer only, for 12 hours.
+
+\`\`\`bash
+curl -X POST http://localhost:3000/api/mobile/token -H "Content-Type: application/json" \\
+  -d '{"id_user":"<username>","password":"<password>"}'
+curl -H "Authorization: Bearer <access_token>" http://localhost:3000/geodata/layers/all
+\`\`\`
+
+Tokens are stateless: signing out means discarding the token on the device. Deleting the user or changing their password revokes all of their tokens.
 
 ## Roles
 
@@ -105,6 +123,21 @@ function components(settings: OpenApiSettings): ComponentsObject {
           "NextAuth JWT session cookie from `POST /api/auth/callback/credentials`. Named `__Secure-next-auth.session-token` " +
           "when the app runs over HTTPS. Browsers send it automatically on this page.",
       },
+      bearerToken: {
+        type: "http",
+        scheme: "bearer",
+        bearerFormat: "JWE",
+        description:
+          "Access token from `POST /api/mobile/token`, sent as `Authorization: Bearer <token>`. Takes precedence over the session cookie.",
+      },
+      signedTerrainUrl: {
+        type: "apiKey",
+        in: "query",
+        name: "t",
+        description:
+          "Signed token from `GET /api/mobile/layers/{layerId}/terrain-url`, accepted by the terrain endpoints of that one layer " +
+          "for 12 hours. When present it is the only credential checked.",
+      },
     },
     parameters: {
       TerrainLayerId: pathParameter("layerId", "Id of a published terrain layer.", { type: "string", pattern: ULID_PATTERN }, SAMPLE_IDS.terrainLayer),
@@ -154,7 +187,7 @@ export function buildOpenApiSpec(settings: OpenApiSettings = currentOpenApiSetti
       license: { name: "MIT", identifier: "MIT" },
     },
     servers: [{ url: "/", description: "This application" }],
-    security: [{ sessionCookie: [] }],
+    security: [{ sessionCookie: [] }, { bearerToken: [] }],
     tags: TAGS,
     paths: buildPaths(settings),
     components: components(settings),

@@ -25,6 +25,7 @@ This is the Next.js port of [Laravel CesiumJS 3D GIS Kit](https://github.com/zak
 - Dashboard: overview, layer management (rename, recategorize, archive/restore, delete), layer categories with colors and icons, user management.
 - Two sign-in methods: **username/email + password** (throttled) and **OAuth** (Discord, GitHub, Google). OAuth signs in to an existing account with the same email; optional self sign-up via `AUTH_OAUTH_ALLOW_SIGNUP`.
 - Password reset by email (optional SMTP); changing or resetting a password signs out the account's other sessions.
+- Bearer tokens for mobile apps and other non-browser clients (`POST /api/mobile/token`), accepted by every `/geodata` endpoint, plus signed terrain URLs for clients that cannot send headers with tile requests (Cesium for Unity).
 
 ## Tech stack
 

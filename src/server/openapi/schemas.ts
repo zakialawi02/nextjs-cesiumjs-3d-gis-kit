@@ -637,5 +637,46 @@ export function buildSchemas(settings: OpenApiSettings): Record<string, SchemaOb
       description: "Enabled sign-in providers keyed by id. OAuth providers appear only when their client id and secret are configured.",
       additionalProperties: schemaRef("AuthProvider"),
     },
+
+    // ---------------------------------------------------------------- mobile (Bearer tokens)
+    MobileTokenRequest: {
+      type: "object",
+      required: ["id_user", "password"],
+      properties: {
+        id_user: { type: "string", maxLength: 255, description: "Username or email (case-insensitive).", examples: ["engineering"] },
+        password: { type: "string", format: "password", writeOnly: true },
+      },
+    },
+    MobileTokenResponse: {
+      type: "object",
+      required: ["token_type", "access_token", "expires_in", "expires_at", "user"],
+      properties: {
+        token_type: { type: "string", const: "Bearer" },
+        access_token: {
+          type: "string",
+          description: "Opaque to clients (an encrypted NextAuth JWT). Send as `Authorization: Bearer <access_token>`.",
+        },
+        expires_in: { type: "integer", description: "Lifetime in seconds (30 days).", examples: [2_592_000] },
+        expires_at: { type: "string", format: "date-time" },
+        user: schemaRef("SessionUser"),
+      },
+    },
+    MobileUserResponse: {
+      type: "object",
+      required: ["user"],
+      properties: { user: schemaRef("SessionUser") },
+    },
+    MobileTerrainUrlResponse: {
+      type: "object",
+      required: ["layer_json_url", "expires_in", "expires_at"],
+      properties: {
+        layer_json_url: {
+          type: "string",
+          description: "Relative to the server: `/geodata/terrain/<layer id>/layer.json?t=<token>`. Treat `t` as opaque.",
+        },
+        expires_in: { type: "integer", description: "Lifetime in seconds (12 hours).", examples: [43_200] },
+        expires_at: { type: "string", format: "date-time" },
+      },
+    },
   };
 }
