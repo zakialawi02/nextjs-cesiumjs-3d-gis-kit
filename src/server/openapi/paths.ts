@@ -223,7 +223,7 @@ export function buildPaths(settings: OpenApiSettings): Record<string, PathItemOb
   // ------------------------------------------------------------------ Mobile (Bearer tokens)
   const sampleMobileToken = {
     token_type: "Bearer",
-    access_token: "eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0..<iv>.<ciphertext>.<tag>",
+    access_token: "<access token>",
     expires_in: 2_592_000,
     expires_at: "2026-12-13T09:30:00.000Z",
     user: sampleSession.user,
