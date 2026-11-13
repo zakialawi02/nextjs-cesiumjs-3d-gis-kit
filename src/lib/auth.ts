@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import type { User as DbUser } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import type { NextAuthOptions, Profile, User as NextAuthUser } from "next-auth";
 import { encode as encodeJwt } from "next-auth/jwt";
@@ -114,6 +115,58 @@ const DUMMY_HASH = "$2b$12$ixEvgas5RnGIVqdkQGDeKukpJhWFRwjCu0pWtCRr21mX7M2UMraa.
 const ACCOUNT_MAX_FAILURES = 20;
 const ACCOUNT_WINDOW_SECONDS = 15 * 60;
 
+export type CredentialsCheck =
+  | { ok: true; user: DbUser }
+  | { ok: false; reason: "failed" }
+  | { ok: false; reason: "throttled"; retryAfter: number };
+
+/**
+ * Checks a username / email + password under the login throttles (per account, per IP, per
+ * identifier + IP). Shared by the NextAuth credentials provider and POST /api/mobile/token, so both
+ * sign-in paths count against the same limits.
+ */
+export async function checkCredentials(idUser: unknown, rawPassword: unknown, ip: string): Promise<CredentialsCheck> {
+  const identifier = typeof idUser === "string" ? idUser.trim().toLowerCase() : "";
+  const password = typeof rawPassword === "string" ? rawPassword : "";
+
+  if (identifier === "" || identifier.length > 255 || password === "") {
+    return { ok: false, reason: "failed" };
+  }
+
+  const ipKey = `login:${ip}`;
+  const throttleKey = `login-identifier:${identifier}|${ip}`;
+  const accountKey = `login-account:${identifier}`;
+
+  if (rateLimiter.tooManyAttempts(accountKey, ACCOUNT_MAX_FAILURES)) {
+    return { ok: false, reason: "throttled", retryAfter: rateLimiter.availableIn(accountKey) };
+  }
+
+  if (rateLimiter.tooManyAttempts(ipKey, RATE_LIMITS.login)) {
+    return { ok: false, reason: "throttled", retryAfter: rateLimiter.availableIn(ipKey) };
+  }
+  rateLimiter.hit(ipKey, 60);
+
+  if (rateLimiter.tooManyAttempts(throttleKey, RATE_LIMITS["login-identifier"])) {
+    return { ok: false, reason: "throttled", retryAfter: rateLimiter.availableIn(throttleKey) };
+  }
+
+  const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identifier);
+  const user = await prisma.user.findFirst({
+    where: { ...(isEmail ? { email: identifier } : { username: identifier }), deleted_at: null },
+  });
+
+  const valid = await bcrypt.compare(password, user?.password ?? DUMMY_HASH);
+  if (!user || !user.password || !valid) {
+    rateLimiter.hit(throttleKey, 60);
+    rateLimiter.hit(accountKey, ACCOUNT_WINDOW_SECONDS);
+    return { ok: false, reason: "failed" };
+  }
+
+  rateLimiter.clear(throttleKey);
+  rateLimiter.clear(accountKey);
+  return { ok: true, user };
+}
+
 const credentialsProvider = CredentialsProvider({
   id: "credentials",
   name: "Username",
@@ -123,47 +176,13 @@ const credentialsProvider = CredentialsProvider({
     remember: { label: "Remember me", type: "text" },
   },
   async authorize(credentials, req) {
-    const identifier =
-      typeof credentials?.id_user === "string" ? credentials.id_user.trim().toLowerCase() : "";
-    const password = typeof credentials?.password === "string" ? credentials.password : "";
-
-    if (identifier === "" || identifier.length > 255 || password === "") {
-      throw new Error(AUTH_MESSAGES.failed);
-    }
-
     const ip = clientIpFromRecord(req?.headers as Record<string, unknown> | undefined);
-    const ipKey = `login:${ip}`;
-    const throttleKey = `login-identifier:${identifier}|${ip}`;
-    const accountKey = `login-account:${identifier}`;
-
-    if (rateLimiter.tooManyAttempts(accountKey, ACCOUNT_MAX_FAILURES)) {
-      throw new Error(AUTH_MESSAGES.throttle(rateLimiter.availableIn(accountKey)));
+    const result = await checkCredentials(credentials?.id_user, credentials?.password, ip);
+    if (!result.ok) {
+      throw new Error(result.reason === "throttled" ? AUTH_MESSAGES.throttle(result.retryAfter) : AUTH_MESSAGES.failed);
     }
 
-    if (rateLimiter.tooManyAttempts(ipKey, RATE_LIMITS.login)) {
-      throw new Error(AUTH_MESSAGES.throttle(rateLimiter.availableIn(ipKey)));
-    }
-    rateLimiter.hit(ipKey, 60);
-
-    if (rateLimiter.tooManyAttempts(throttleKey, RATE_LIMITS["login-identifier"])) {
-      throw new Error(AUTH_MESSAGES.throttle(rateLimiter.availableIn(throttleKey)));
-    }
-
-    const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identifier);
-    const user = await prisma.user.findFirst({
-      where: { ...(isEmail ? { email: identifier } : { username: identifier }), deleted_at: null },
-    });
-
-    const valid = await bcrypt.compare(password, user?.password ?? DUMMY_HASH);
-    if (!user || !user.password || !valid) {
-      rateLimiter.hit(throttleKey, 60);
-      rateLimiter.hit(accountKey, ACCOUNT_WINDOW_SECONDS);
-      throw new Error(AUTH_MESSAGES.failed);
-    }
-
-    rateLimiter.clear(throttleKey);
-    rateLimiter.clear(accountKey);
-
+    const { user } = result;
     return {
       id: user.id,
       name: user.name,

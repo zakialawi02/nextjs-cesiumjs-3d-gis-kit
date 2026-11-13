@@ -2,10 +2,11 @@ import { promisify } from "node:util";
 import { gunzip } from "node:zlib";
 
 import { requireApiUser } from "@/server/auth";
-import { abort, handler } from "@/server/http";
+import { abort, handler, HttpError } from "@/server/http";
 import { storage } from "@/server/storage";
 
 import { abortUnlessPublished, isMissingFileError } from "@/server/geodata/published-layer";
+import { verifyTerrainToken, withTerrainToken } from "@/server/geodata/terrain-url";
 
 export const dynamic = "force-dynamic";
 
@@ -24,18 +25,27 @@ const TILE_PATTERN = /^([0-9]{1,2})\/([0-9]{1,9})\/([0-9]{1,9})\.terrain$/;
  * GET /geodata/terrain/{layerId}/layer.json and /geodata/terrain/{layerId}/{z}/{x}/{y}.terrain
  * (GeodataLayerController::serveTerrainMetadata / serveTerrainTile). Files come from
  * storage/app/public/terrain-tiles/<layerId>, only for published layers.
+ *
+ * Authenticated by the session cookie or a Bearer token, or by a signed `t` parameter from
+ * GET /api/mobile/layers/{layerId}/terrain-url (clients that cannot send headers with tile
+ * requests). When `t` is present it is the only credential checked.
  */
-export const GET = handler<{ layerId: string; path: string[] }>(async (_request, { params }) => {
+export const GET = handler<{ layerId: string; path: string[] }>(async (request, { params }) => {
   const { layerId, path } = await params;
   const rest = path.join("/");
   const tile = TILE_PATTERN.exec(rest);
   if (!LAYER_ID_PATTERN.test(layerId) || (rest !== "layer.json" && !tile)) abort(404);
 
-  await requireApiUser();
+  const signed = request.nextUrl.searchParams.get("t");
+  if (signed !== null) {
+    if (!(await verifyTerrainToken(layerId, signed))) throw new HttpError(401);
+  } else {
+    await requireApiUser();
+  }
 
   return tile
     ? serveTerrainTile(layerId, tile[1], tile[2], tile[3])
-    : serveTerrainMetadata(layerId);
+    : serveTerrainMetadata(layerId, signed);
 });
 
 /**
@@ -77,8 +87,11 @@ async function serveTerrainTile(
   });
 }
 
-/** layer.json, with the tile URL templates versioned to bust stale caches. */
-async function serveTerrainMetadata(layerId: string): Promise<Response> {
+/**
+ * layer.json, with the tile URL templates versioned to bust stale caches, and carrying the signed
+ * `t` token when the request used one.
+ */
+async function serveTerrainMetadata(layerId: string, signed: string | null): Promise<Response> {
   await abortUnlessPublished(layerId);
 
   let raw: string;
@@ -100,7 +113,8 @@ async function serveTerrainMetadata(layerId: string): Promise<Response> {
     for (const index of Object.keys(tiles)) {
       const template = String(tiles[index]);
       const separator = template.includes("?") ? "&" : "?";
-      tiles[index] = `${template}${separator}terrain_revision=${TERRAIN_TILE_REVISION}`;
+      const versioned = `${template}${separator}terrain_revision=${TERRAIN_TILE_REVISION}`;
+      tiles[index] = signed !== null ? withTerrainToken(versioned, signed) : versioned;
     }
   }
 
